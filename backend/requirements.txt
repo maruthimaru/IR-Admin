@@ -1,0 +1,52 @@
+# Django Core
+Django==4.2.7
+djangorestframework==3.14.0
+djangorestframework-simplejwt==5.3.0
+django-cors-headers==4.3.1
+django-environ==0.11.2
+
+# MongoDB
+pymongo==4.6.0
+motor==3.3.2
+
+# Authentication & Security
+bcrypt==4.0.1
+cryptography==41.0.7
+PyJWT==2.8.0
+
+# Payment Gateways (per-company, configured via Company Settings)
+stripe==7.8.0
+razorpay==1.4.1       # For Indian/INR payments
+
+# Email (per-company, configured via Company Settings)
+sendgrid==6.11.0
+
+# SMS (per-company, configured via Company Settings)
+twilio==8.10.0
+
+# Task Queue
+celery==5.3.4
+redis==5.0.1
+django-celery-beat==2.5.0
+
+# Utilities
+python-decouple==3.8
+Pillow==10.1.0
+requests==2.31.0
+python-slugify==8.0.1
+phonenumbers==8.13.26
+
+# Testing
+pytest==7.4.3
+pytest-django==4.7.0
+factory-boy==3.3.0
+
+# Development
+black==23.11.0
+flake8==6.1.0
+isort==5.12.0
+
+# Production
+gunicorn==21.2.0
+whitenoise==6.6.0
+
