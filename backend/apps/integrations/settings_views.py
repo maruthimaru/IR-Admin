@@ -162,6 +162,51 @@ def toggle_payment(request):
     return Response({'message': f'{provider} {"enabled" if enabled else "disabled"}', **result})
 
 
+# ── Cash on Delivery (COD) ───────────────────────────────────────────────────
+
+@api_view(['GET', 'POST'])
+@permission_classes([IsAuthenticated])
+def cod_settings(request):
+    """
+    GET  — Get COD settings
+    POST — Save COD settings
+    {
+        "enabled": true,
+        "settings": {
+            "instructions": "Pay cash to the delivery agent.",
+            "max_order_amount": 5000
+        }
+    }
+    """
+    if not _require_company_admin(request):
+        return Response({'error': 'Company admin access required'}, status=403)
+
+    company_id = _get_company_id(request)
+    if not company_id:
+        return Response({'error': 'Company not found'}, status=400)
+
+    creds = CompanyCredentials(company_id)
+
+    if request.method == 'GET':
+        data = creds.get_provider('cod', decrypt=False)
+        return Response(data or {'enabled': False, 'configured': False, 'credentials': {}})
+
+    enabled = bool(request.data.get('enabled', True))
+    settings = request.data.get('settings') or {}
+    if not isinstance(settings, dict):
+        settings = {}
+
+    try:
+        creds.save_provider('cod', settings, enabled=enabled)
+    except ValueError as e:
+        return Response({'error': str(e)}, status=400)
+    except Exception as e:
+        logger.exception(f"Failed to save COD settings for company {company_id}")
+        return Response({'error': f'Database error: {str(e)}'}, status=500)
+
+    return Response({'message': 'COD settings saved successfully', 'enabled': enabled}, status=201)
+
+
 # ── SMS (Twilio) ─────────────────────────────────────────────────────────────
 
 @api_view(['GET', 'POST'])

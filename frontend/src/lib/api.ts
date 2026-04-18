@@ -181,6 +181,7 @@ export const reportsAPI = {
 };
 
 export const integrationsAPI = {
+  // ── Runtime actions ─────────────────────────────────────────
   createPaymentIntent: (amount: number, currency?: string) =>
     api.post('/integrations/payment/create-intent/', { amount, currency }),
   confirmPayment: (paymentIntentId: string) =>
@@ -197,6 +198,32 @@ export const integrationsAPI = {
     api.post('/integrations/sms/send-otp/', { phone_number: phoneNumber }),
   getStatus: () =>
     api.get('/integrations/status/'),
+
+  // ── Company integration settings (admin) ─────────────────────
+  getOverview: () =>
+    api.get('/integrations/settings/'),
+  getPaymentSettings: () =>
+    api.get('/integrations/settings/payment/'),
+  savePaymentSettings: (data: object) =>
+    api.post('/integrations/settings/payment/', data),
+  togglePayment: (provider: string, enabled: boolean) =>
+    api.post('/integrations/settings/payment/toggle/', { provider, enabled }),
+  getCodSettings: () =>
+    api.get('/integrations/settings/cod/'),
+  saveCodSettings: (data: object) =>
+    api.post('/integrations/settings/cod/', data),
+  getSmsSettings: () =>
+    api.get('/integrations/settings/sms/'),
+  saveSmsSettings: (data: object) =>
+    api.post('/integrations/settings/sms/', data),
+  testSms: (toNumber: string) =>
+    api.post('/integrations/settings/sms/test/', { to_number: toNumber }),
+  getEmailSettings: () =>
+    api.get('/integrations/settings/email/'),
+  saveEmailSettings: (data: object) =>
+    api.post('/integrations/settings/email/', data),
+  testEmail: (toEmail?: string) =>
+    api.post('/integrations/settings/email/test/', toEmail ? { to_email: toEmail } : {}),
 };
 
 export default api;

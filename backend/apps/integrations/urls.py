@@ -7,6 +7,7 @@ urlpatterns = [
     path('settings/', settings_views.integration_overview, name='integration_overview'),
     path('settings/payment/', settings_views.payment_settings, name='payment_settings'),
     path('settings/payment/toggle/', settings_views.toggle_payment, name='toggle_payment'),
+    path('settings/cod/', settings_views.cod_settings, name='cod_settings'),
     path('settings/sms/', settings_views.sms_settings, name='sms_settings'),
     path('settings/sms/test/', settings_views.test_sms, name='test_sms'),
     path('settings/email/', settings_views.email_settings, name='email_settings'),

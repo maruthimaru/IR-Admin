@@ -202,6 +202,88 @@ function FormSourceConfig({ field, onUpdate }: FormSourceConfigProps) {
   );
 }
 
+// ── Conditional Formula Config ───────────────────────────────────────────────
+
+function ConditionalConfig({ field, allFields, onUpdate }: {
+  field: BuilderField;
+  allFields: BuilderField[];
+  onUpdate: (patch: Partial<BuilderField>) => void;
+}) {
+  const conditions = field.conditions ?? [];
+  const conditionableFields = allFields.filter(f =>
+    f.id !== field.id && f.key &&
+    ['select', 'radio', 'api_select', 'dependent_select'].includes(f.type ?? '')
+  );
+  const numKeys = allFields
+    .filter(f => f.id !== field.id && (f.type === 'number' || f.type === 'currency') && f.key)
+    .map(f => ({ key: f.key!, label: f.label || f.key! }));
+
+  const updateCondition = (idx: number, patch: Partial<{ when: string; formula: string }>) => {
+    const updated = conditions.map((c, i) => i === idx ? { ...c, ...patch } : c);
+    onUpdate({ conditions: updated });
+  };
+  const addCondition = () => onUpdate({ conditions: [...conditions, { when: '', formula: '' }] });
+  const removeCondition = (idx: number) => onUpdate({ conditions: conditions.filter((_, i) => i !== idx) });
+
+  return (
+    <div className="space-y-3">
+      <div>
+        <label className="form-label">Condition Field</label>
+        <select className="form-input" value={field.condition_field ?? ''}
+          onChange={e => onUpdate({ condition_field: e.target.value })}>
+          <option value="">— select dropdown field —</option>
+          {conditionableFields.map(f => (
+            <option key={f.id} value={f.key}>{f.label} ({f.key})</option>
+          ))}
+        </select>
+        <p className="text-xs text-gray-400 mt-0.5">The dropdown whose value determines which formula to use</p>
+      </div>
+
+      {numKeys.length > 0 && (
+        <p className="text-xs text-amber-700">
+          Available fields:{' '}
+          {numKeys.map(({ key, label }) => (
+            <code key={key} className="bg-amber-100 px-1 rounded mr-1">{key} ({label})</code>
+          ))}
+        </p>
+      )}
+
+      <div className="space-y-2">
+        <p className="text-xs font-semibold text-gray-600">Condition Rules</p>
+        {conditions.map((c, i) => (
+          <div key={i} className="flex items-center gap-2">
+            <div className="flex items-center gap-1 shrink-0">
+              <span className="text-xs text-gray-400">When =</span>
+              <input type="text" className="form-input py-1 text-sm w-24"
+                placeholder="value" value={c.when}
+                onChange={e => updateCondition(i, { when: e.target.value })} />
+            </div>
+            <span className="text-xs text-gray-400 shrink-0">→ Formula:</span>
+            <input type="text" className="form-input py-1 text-sm font-mono flex-1"
+              placeholder="e.g. weight * rate" value={c.formula}
+              onChange={e => updateCondition(i, { formula: e.target.value })} />
+            <button type="button" onClick={() => removeCondition(i)}
+              className="p-1 text-gray-400 hover:text-red-500 shrink-0">
+              ✕
+            </button>
+          </div>
+        ))}
+        <button type="button" onClick={addCondition}
+          className="text-xs text-amber-600 hover:text-amber-800 font-medium">
+          + Add Rule
+        </button>
+      </div>
+
+      <div>
+        <label className="form-label">Default Formula <span className="font-normal text-gray-400">(when no rule matches)</span></label>
+        <input type="text" className="form-input font-mono text-sm"
+          placeholder="e.g. price * quantity" value={field.condition_default_formula ?? ''}
+          onChange={e => onUpdate({ condition_default_formula: e.target.value })} />
+      </div>
+    </div>
+  );
+}
+
 // ── Field Lookup Config ──────────────────────────────────────────────────────
 
 interface FieldLookupConfigProps {
@@ -569,7 +651,7 @@ function FieldSettingsPanel({ field, allFields, onUpdate, generateKey, isSubFiel
         <div className="col-span-2 space-y-3 bg-amber-50 rounded-lg p-3 border border-amber-100">
           <p className="text-xs font-semibold text-amber-700 uppercase tracking-wide">Value Source</p>
           <div className="flex gap-3 flex-wrap">
-            {(['manual', 'api', 'formula', 'field_lookup'] as const).map(src => (
+            {(['manual', 'api', 'formula', 'field_lookup', 'conditional'] as const).map(src => (
               <label key={src} className="flex items-center gap-1.5 cursor-pointer">
                 <input
                   type="radio"
@@ -579,7 +661,7 @@ function FieldSettingsPanel({ field, allFields, onUpdate, generateKey, isSubFiel
                   onChange={() => onUpdate({ value_source: src })}
                   className="text-amber-600"
                 />
-                <span className="text-sm capitalize text-gray-700">{src === 'api' ? 'API Fetch' : src === 'formula' ? 'Formula' : src === 'field_lookup' ? 'Field Lookup' : 'Manual'}</span>
+                <span className="text-sm capitalize text-gray-700">{src === 'api' ? 'API Fetch' : src === 'formula' ? 'Formula' : src === 'field_lookup' ? 'Field Lookup' : src === 'conditional' ? 'Conditional' : 'Manual'}</span>
               </label>
             ))}
           </div>
@@ -623,6 +705,15 @@ function FieldSettingsPanel({ field, allFields, onUpdate, generateKey, isSubFiel
           {/* Field lookup config for number/currency */}
           {(field.value_source ?? 'manual') === 'field_lookup' && (
             <FieldLookupConfig
+              field={field}
+              allFields={allFields}
+              onUpdate={onUpdate}
+            />
+          )}
+
+          {/* Conditional formula config */}
+          {(field.value_source ?? 'manual') === 'conditional' && (
+            <ConditionalConfig
               field={field}
               allFields={allFields}
               onUpdate={onUpdate}
@@ -1087,6 +1178,7 @@ function SubFormBuilder({ fields: subFields, allParentFields, onChange, parentSu
         api_auth_type: 'none' as const, api_auth_token: '',
         api_auth_username: '', api_auth_password: '', api_body: '',
         lookup_field_key: '', lookup_source_field: '',
+        condition_field: '', conditions: [], condition_default_formula: '',
       } : {}),
       ...(type === 'textarea' ? {
         value_source: 'manual' as const,
@@ -1300,6 +1392,9 @@ export default function FormBuilder({ onSuccess, initialConfig }: FormBuilderPro
         api_body: '',
         lookup_field_key: '',
         lookup_source_field: '',
+        condition_field: '',
+        conditions: [],
+        condition_default_formula: '',
       } : {}),
       // Textarea defaults
       ...(type === 'textarea' ? {
@@ -1446,11 +1541,18 @@ export default function FormBuilder({ onSuccess, initialConfig }: FormBuilderPro
         lookup_field_key:  sf.lookup_field_key  ?? '',
         lookup_source_field: sf.lookup_source_field ?? '',
         sum_to_main:       sf.sum_to_main       ?? false,
+        condition_field:   sf.condition_field   ?? '',
+        conditions:        sf.conditions        ?? [],
+        condition_default_formula: sf.condition_default_formula ?? '',
         sub_form_fields: [],  // no deeper nesting
       })),
       // Field lookup (text field only)
       lookup_field_key: f.lookup_field_key ?? '',
       lookup_source_field: f.lookup_source_field ?? '',
+      // Conditional formula
+      condition_field:   f.condition_field   ?? '',
+      conditions:        f.conditions        ?? [],
+      condition_default_formula: f.condition_default_formula ?? '',
     }));
     return formFields;
   };

@@ -12,7 +12,7 @@ import { useTenantStore } from '@/store/tenant';
 import { authAPI } from '@/lib/api';
 import {
   Building2, LogOut, LayoutDashboard, FileText,
-  Users, Settings, Globe, BarChart2,
+  Users, Settings, Globe, BarChart2, Plug,
 } from 'lucide-react';
 
 interface TenantShellProps {
@@ -44,9 +44,10 @@ export default function TenantShell({ children }: TenantShellProps) {
     { icon: LayoutDashboard, label: 'Dashboard',  href: `/${subdomain}/dashboard` },
     { icon: FileText,        label: 'Forms',       href: `/${subdomain}/developer/forms` },
     { icon: BarChart2,       label: 'Reports',     href: `/${subdomain}/developer/reports` },
-    { icon: Globe,           label: 'Pages',       href: `/${subdomain}/developer/pages` },
-    { icon: Users,           label: 'Users',       href: `/${subdomain}/users` },
-    { icon: Settings,        label: 'Settings',    href: `/${subdomain}/settings` },
+    { icon: Globe,           label: 'Pages',         href: `/${subdomain}/developer/pages` },
+    { icon: Plug,            label: 'Integrations',  href: `/${subdomain}/developer/integrations` },
+    { icon: Users,           label: 'Users',         href: `/${subdomain}/users` },
+    { icon: Settings,        label: 'Settings',      href: `/${subdomain}/settings` },
   ];
 
   return (

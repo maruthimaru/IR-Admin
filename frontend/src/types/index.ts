@@ -2,6 +2,11 @@
 
 export type UserRole = 'super_admin' | 'company_admin' | 'developer' | 'end_user';
 
+export interface ConditionRule {
+  when: string;
+  formula: string;
+}
+
 export interface User {
   id: number;
   email: string;
@@ -96,7 +101,7 @@ export interface FormField {
   api_source?: 'url' | 'form';   // default 'url'
   source_form?: string;           // input form name when api_source === 'form'
   // Number / currency / text value source
-  value_source?: 'manual' | 'api' | 'formula' | 'combined' | 'field_lookup';
+  value_source?: 'manual' | 'api' | 'formula' | 'combined' | 'field_lookup' | 'conditional';
   formula?: string;             // e.g. "price * quantity" using other field keys
   // API select — label stored alongside the value for list display
   table_value_key?: string;
@@ -115,6 +120,10 @@ export interface FormField {
   sub_form_fields?: FormField[];
   // Sum all rows of this sub-form column into a main-form field
   sum_to_main?: boolean;
+  // Conditional formula (value_source === 'conditional')
+  condition_field?: string;
+  conditions?: ConditionRule[];
+  condition_default_formula?: string;
   // Field lookup — auto-populate from a form-source dropdown
   lookup_field_key?: string;
   lookup_source_field?: string;

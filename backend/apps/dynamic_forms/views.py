@@ -405,6 +405,63 @@ def _get_next_uid(db, collection_name: str, field_key: str) -> int:
     return 1
 
 
+def _get_next_subform_uid(db, collection_name: str, sub_form_key: str, uid_field_key: str, batch_vals: list) -> int:
+    """Return next auto-increment integer for a uid field inside sub-form rows."""
+    max_val = 0
+    pipeline = [
+        {'$project': {sub_form_key: 1}},
+        {'$unwind': {'path': f'${sub_form_key}', 'preserveNullAndEmptyArrays': False}},
+        {'$group': {'_id': None, 'mx': {'$max': f'${sub_form_key}.{uid_field_key}'}}},
+    ]
+    try:
+        for doc in db[collection_name].aggregate(pipeline):
+            v = doc.get('mx')
+            if isinstance(v, (int, float)):
+                max_val = max(max_val, int(v))
+    except Exception:
+        pass
+    for v in batch_vals:
+        if isinstance(v, int):
+            max_val = max(max_val, v)
+    return max_val + 1
+
+
+def _process_subform_rows(db, collection_name: str, sub_form_key: str, rows, sub_fields: list) -> list:
+    """Process sub-form row array: auto-generate uid fields, resolve combined {{auto_generate}}."""
+    if not isinstance(rows, list):
+        return []
+    processed = []
+    batch_uids: dict = {}  # tracks already-assigned values per field key in this batch
+
+    for row in rows:
+        row = dict(row) if isinstance(row, dict) else {}
+        for sf in sub_fields:
+            sf_key   = sf.get('key', '')
+            sf_type  = sf.get('type', '')
+            if not sf_key:
+                continue
+
+            if sf_type == 'uid':
+                # Only generate if not already set (preserves existing UIDs on edit)
+                if not row.get(sf_key) and row.get(sf_key) != 0:
+                    vals = batch_uids.get(sf_key, [])
+                    val  = _get_next_subform_uid(db, collection_name, sub_form_key, sf_key, vals)
+                    row[sf_key] = val
+                    batch_uids.setdefault(sf_key, []).append(val)
+
+            elif sf_type == 'text' and sf.get('value_source') == 'combined':
+                raw = str(row.get(sf_key, '') or '')
+                if '{{auto_generate}}' in raw:
+                    counter_key = f'_comb_{sf_key}'
+                    vals = batch_uids.get(counter_key, [])
+                    val  = _get_next_subform_uid(db, collection_name, sub_form_key, sf_key, vals)
+                    row[sf_key] = raw.replace('{{auto_generate}}', str(val))
+                    batch_uids.setdefault(counter_key, []).append(val)
+
+        processed.append(row)
+    return processed
+
+
 # ──────────────────────────────────────────────
 # RUNTIME DATA API
 # ──────────────────────────────────────────────
@@ -519,6 +576,16 @@ def _create_record(request, db, collection_name, form_config):
     if errors:
         return Response({'errors': errors}, status=400)
 
+    # Process sub-form rows: uid auto-generation, combined text {{auto_generate}}
+    for field in fields:
+        if field['type'] == 'sub_form':
+            key = field['key']
+            sub_fields = field.get('sub_form_fields', [])
+            if sub_fields and key in validated_data:
+                validated_data[key] = _process_subform_rows(
+                    db, collection_name, key, validated_data[key], sub_fields
+                )
+
     # Persist table_value_key labels (display labels for api_select / dependent_select).
     # Stored under "{field_key}_{table_value_key}" to avoid collisions when multiple
     # fields share the same table_value_key name (e.g. all three using "name").
@@ -609,6 +676,16 @@ def record_detail(request, form_name, record_id):
 
         if errors:
             return Response({'errors': errors}, status=400)
+
+        # Process sub-form rows: uid auto-generation, combined text {{auto_generate}}
+        for field in fields:
+            if field['type'] == 'sub_form':
+                key = field['key']
+                sub_fields = field.get('sub_form_fields', [])
+                if sub_fields and key in update_data:
+                    update_data[key] = _process_subform_rows(
+                        db, collection_name, key, update_data[key], sub_fields
+                    )
 
         # Persist table_value_key labels (display labels for api_select / dependent_select).
         # Stored under "{field_key}_{table_value_key}" to avoid collisions.

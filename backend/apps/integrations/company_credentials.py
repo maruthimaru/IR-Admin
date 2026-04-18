@@ -29,6 +29,7 @@ PROVIDER_ENCRYPT_KEYS = {
     'twilio':    TWILIO_KEYS,
     'sendgrid':  SENDGRID_KEYS,
     'smtp':      SMTP_KEYS,
+    'cod':       [],   # no sensitive fields
 }
 
 
@@ -44,16 +45,23 @@ class CompanyCredentials:
 
     def _get_company(self) -> Optional[dict]:
         try:
-            return self._db['companies'].find_one({'_id': ObjectId(self.company_id)})
+            return self._db['companies'].find_one(self._company_oid())
         except Exception:
             return None
 
     # ── Save / Update ──────────────────────────────────────────────────────────
 
+    def _company_oid(self):
+        """Return a query filter for this company, handling both ObjectId and string IDs."""
+        try:
+            return {'_id': ObjectId(self.company_id)}
+        except Exception:
+            return {'_id': self.company_id}
+
     def save_provider(self, provider: str, credentials: dict, enabled: bool = True) -> dict:
         """
         Save (and encrypt) credentials for a provider.
-        provider: 'stripe' | 'razorpay' | 'twilio' | 'sendgrid' | 'smtp'
+        provider: 'stripe' | 'razorpay' | 'twilio' | 'sendgrid' | 'smtp' | 'cod'
         """
         encrypt_keys = PROVIDER_ENCRYPT_KEYS.get(provider, [])
         encrypted = encrypt_dict(credentials, encrypt_keys)
@@ -65,17 +73,19 @@ class CompanyCredentials:
             }
         }
 
-        self._db['companies'].update_one(
-            {'_id': ObjectId(self.company_id)},
+        result = self._db['companies'].update_one(
+            self._company_oid(),
             {'$set': update}
         )
+        if result.matched_count == 0:
+            raise ValueError(f"Company {self.company_id} not found in database")
         logger.info(f"Saved {provider} credentials for company {self.company_id}")
         return {'success': True, 'provider': provider, 'enabled': enabled}
 
     def toggle_provider(self, provider: str, enabled: bool) -> dict:
         """Enable or disable a provider without changing its credentials."""
         self._db['companies'].update_one(
-            {'_id': ObjectId(self.company_id)},
+            self._company_oid(),
             {'$set': {f'integrations.{provider}.enabled': enabled}}
         )
         return {'success': True, 'provider': provider, 'enabled': enabled}
@@ -98,12 +108,12 @@ class CompanyCredentials:
         if not provider_data:
             return None
 
+        raw_creds = provider_data.get('credentials', {})
         result = {
             'enabled': provider_data.get('enabled', False),
+            'configured': bool(raw_creds) or provider_data.get('enabled', False),
             'credentials': {},
         }
-
-        raw_creds = provider_data.get('credentials', {})
 
         if decrypt:
             encrypt_keys = PROVIDER_ENCRYPT_KEYS.get(provider, [])
@@ -131,7 +141,7 @@ class CompanyCredentials:
         integrations = company.get('integrations', {})
         result = {}
 
-        for provider in ['stripe', 'razorpay', 'twilio', 'sendgrid', 'smtp']:
+        for provider in ['stripe', 'razorpay', 'cod', 'twilio', 'sendgrid', 'smtp']:
             pdata = integrations.get(provider)
             if pdata:
                 result[provider] = {

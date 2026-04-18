@@ -773,6 +773,56 @@ function FormulaResultField({ field, allValues, error, onChange }: FieldRenderer
   );
 }
 
+// ── Conditional Formula Field ────────────────────────────────
+
+function ConditionalField({ field, value, error, onChange, allValues }: FieldRendererProps) {
+  const conditionValue = String(allValues?.[field.condition_field ?? ''] ?? '');
+  const matched = field.conditions?.find(c => c.when === conditionValue);
+  const formula = matched?.formula ?? field.condition_default_formula ?? '';
+
+  const computed = useMemo(
+    () => evalFormula(formula, allValues ?? {}),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [formula, JSON.stringify(allValues)]
+  );
+
+  const prevRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (computed !== null && computed !== prevRef.current) {
+      prevRef.current = computed;
+      onChange(computed);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [computed]);
+
+  const inputClass = `form-input bg-gray-50 cursor-not-allowed ${error ? 'border-red-400' : ''}`;
+  const display = computed !== null ? String(computed) : (value !== undefined ? String(value) : '');
+
+  return (
+    <div className="space-y-1">
+      <div className="relative">
+        {field.type === 'currency' && (
+          <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500 text-sm">$</span>
+        )}
+        {field.type === 'percentage' && (
+          <span className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-500 text-sm">%</span>
+        )}
+        <input
+          type="number"
+          readOnly
+          className={`${inputClass} ${field.type === 'currency' ? 'pl-8' : ''} ${field.type === 'percentage' ? 'pr-8' : ''}`}
+          value={display}
+          placeholder={conditionValue ? `Formula: ${formula || 'not set'}` : 'Select condition field…'}
+        />
+      </div>
+      {!formula && conditionValue && (
+        <p className="text-xs text-amber-500">No rule matched for &ldquo;{conditionValue}&rdquo; — configure a condition rule or default formula</p>
+      )}
+      {error && <p className="text-xs text-red-500">{error}</p>}
+    </div>
+  );
+}
+
 // ── API Number/Currency Field ────────────────────────────────
 
 function ApiNumberField({ field, error, onChange }: FieldRendererProps) {
@@ -902,6 +952,44 @@ function CombinedTextField({ field, value, error, onChange, allValues }: FieldRe
   );
 }
 
+// ── Sub Form: Conditional Cell ───────────────────────────────
+
+function SubFormConditionalCell({ field, value, onChange, rowValues }: {
+  field: FormField; value: unknown; onChange: (v: unknown) => void;
+  rowValues: Record<string, unknown>;
+}) {
+  const conditionValue = String(rowValues[field.condition_field ?? ''] ?? '');
+  const matched = field.conditions?.find(c => c.when === conditionValue);
+  const formula = matched?.formula ?? field.condition_default_formula ?? '';
+
+  const computed = useMemo(
+    () => evalFormula(formula, rowValues),
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  [formula, JSON.stringify(rowValues)]);
+
+  const prevRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (computed !== null && computed !== prevRef.current) {
+      prevRef.current = computed;
+      onChange(computed);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [computed]);
+
+  const cls = 'form-input py-1 text-sm min-w-0 bg-gray-50 cursor-not-allowed';
+  return (
+    <div className="relative">
+      {field.type === 'currency' && (
+        <span className="absolute left-2 top-1/2 -translate-y-1/2 text-gray-400 text-xs">$</span>
+      )}
+      <input type="number" readOnly
+        className={`${cls} ${field.type === 'currency' ? 'pl-5' : ''}`}
+        value={computed !== null ? computed : (value !== undefined ? String(value) : '')}
+        placeholder={conditionValue ? (formula ? 'Calculating…' : 'No rule') : 'Auto'} />
+    </div>
+  );
+}
+
 // ── Sub Form Field ───────────────────────────────────────────
 
 function SubFormApiSelectCell({ field, value, onChange }: { field: FormField; value: unknown; onChange: (v: unknown) => void }) {
@@ -1009,6 +1097,86 @@ function SubFormDependentSelectCell({ field, value, onChange, rowValues }: {
   );
 }
 
+// ── Sub Form: Combined Text Cell ─────────────────────────────
+
+function SubFormCombinedCell({ field, value, onChange, rowValues }: {
+  field: FormField; value: unknown; onChange: (v: unknown) => void;
+  rowValues: Record<string, unknown>;
+}) {
+  const template = field.combined_template ?? '';
+
+  // Build the value to send: substitute {{field_key}} from sibling row values,
+  // keep {{auto_generate}} unresolved so the backend fills it in on save.
+  const submittedValue = useMemo(() =>
+    template.replace(/\{\{(\w+)\}\}/g, (_, key: string) => {
+      if (key === 'auto_generate') return '{{auto_generate}}';
+      return String(rowValues[key] ?? '');
+    }),
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  [template, JSON.stringify(rowValues)]);
+
+  const prevRef = useRef('');
+  useEffect(() => {
+    const current = String(value ?? '');
+    // Only push if still unresolved (has placeholder or is empty); backend-resolved values are kept.
+    if (current && !current.includes('{{auto_generate}}')) return;
+    if (submittedValue !== prevRef.current) {
+      prevRef.current = submittedValue;
+      onChange(submittedValue);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [submittedValue]);
+
+  // Display: show backend-resolved value if saved, otherwise show preview with '#'
+  const current = String(value ?? '');
+  const displayValue = current && !current.includes('{{auto_generate}}')
+    ? current
+    : template.replace(/\{\{(\w+)\}\}/g, (_, key: string) => {
+        if (key === 'auto_generate') return '#';
+        return String(rowValues[key] ?? '');
+      });
+
+  return (
+    <input type="text" readOnly
+      className="form-input py-1 text-sm min-w-0 bg-gray-50 text-gray-500"
+      value={displayValue} placeholder="Auto" />
+  );
+}
+
+// ── Sub Form: Formula Cell ────────────────────────────────────
+
+function SubFormFormulaCell({ field, value, onChange, rowValues }: {
+  field: FormField; value: unknown; onChange: (v: unknown) => void;
+  rowValues: Record<string, unknown>;
+}) {
+  const computed = useMemo(
+    () => evalFormula(field.formula ?? '', rowValues),
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  [field.formula, JSON.stringify(rowValues)]);
+
+  const prevRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (computed !== null && computed !== prevRef.current) {
+      prevRef.current = computed;
+      onChange(computed);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [computed]);
+
+  const cls = 'form-input py-1 text-sm min-w-0 bg-gray-50 cursor-not-allowed';
+  return (
+    <div className="relative">
+      {field.type === 'currency' && (
+        <span className="absolute left-2 top-1/2 -translate-y-1/2 text-gray-400 text-xs">$</span>
+      )}
+      <input type="number" readOnly
+        className={`${cls} ${field.type === 'currency' ? 'pl-5' : ''}`}
+        value={computed !== null ? computed : (value !== undefined ? String(value) : '')}
+        placeholder="Formula" />
+    </div>
+  );
+}
+
 function SubFormFieldLookupCell({ field, value, onChange, rowValues, siblingFields }: {
   field: FormField; value: unknown; onChange: (v: unknown) => void;
   rowValues: Record<string, unknown>; siblingFields: FormField[];
@@ -1057,6 +1225,10 @@ function SubFormCellRenderer({ field, value, onChange, rowValues, siblingFields 
 }) {
   const cls = 'form-input py-1 text-sm min-w-0';
 
+  // Hidden sub-form fields are never shown
+  if (field.hidden) return null;
+
+  // Field lookup
   if (field.value_source === 'field_lookup') {
     return (
       <SubFormFieldLookupCell
@@ -1065,24 +1237,80 @@ function SubFormCellRenderer({ field, value, onChange, rowValues, siblingFields 
     );
   }
 
+  // Formula (number/currency/percentage with value_source === 'formula')
+  if (field.value_source === 'formula' && (field.type === 'number' || field.type === 'currency' || field.type === 'percentage')) {
+    return <SubFormFormulaCell field={field} value={value} onChange={onChange} rowValues={rowValues} />;
+  }
+
+  // Conditional formula
+  if (field.value_source === 'conditional' && (field.type === 'number' || field.type === 'currency' || field.type === 'percentage')) {
+    return <SubFormConditionalCell field={field} value={value} onChange={onChange} rowValues={rowValues} />;
+  }
+
+  // Combined text
+  if (field.type === 'text' && field.value_source === 'combined') {
+    return <SubFormCombinedCell field={field} value={value} onChange={onChange} rowValues={rowValues} />;
+  }
+
   switch (field.type) {
+    case 'uid':
+      return (
+        <input type="text" readOnly
+          className={`${cls} bg-gray-50 text-gray-400`}
+          value={value !== undefined && value !== '' ? String(value) : ''}
+          placeholder="Auto" />
+      );
     case 'number': case 'currency':
       return <input type="number" className={cls} value={value !== undefined ? String(value) : ''}
         onChange={e => onChange(e.target.value ? parseFloat(e.target.value) : '')} />;
-    case 'select':
+    case 'percentage':
+      return <input type="number" className={cls} value={value !== undefined ? String(value) : ''}
+        onChange={e => onChange(e.target.value ? parseFloat(e.target.value) : '')} />;
+    case 'select': case 'radio':
       return (
         <select className={cls} value={String(value ?? '')} onChange={e => onChange(e.target.value)}>
           <option value="">Select…</option>
           {field.options?.map(o => <option key={String(o.value)} value={String(o.value)}>{o.label}</option>)}
         </select>
       );
-    case 'checkbox':
+    case 'multi_select':
+      return (
+        <select className={cls} multiple
+          value={Array.isArray(value) ? (value as string[]) : []}
+          onChange={e => onChange(Array.from(e.target.selectedOptions, o => o.value))}>
+          {field.options?.map(o => <option key={String(o.value)} value={String(o.value)}>{o.label}</option>)}
+        </select>
+      );
+    case 'checkbox': case 'switch':
       return <input type="checkbox" checked={Boolean(value)} className="w-4 h-4 mt-1"
         onChange={e => onChange(e.target.checked)} />;
     case 'date':
       return <input type="date" className={cls} value={String(value ?? '')} onChange={e => onChange(e.target.value)} />;
+    case 'datetime':
+      return <input type="datetime-local" className={cls} value={String(value ?? '')} onChange={e => onChange(e.target.value)} />;
+    case 'time':
+      return <input type="time" className={cls} value={String(value ?? '')} onChange={e => onChange(e.target.value)} />;
     case 'textarea':
       return <textarea className={cls} rows={2} value={String(value ?? '')} onChange={e => onChange(e.target.value)} />;
+    case 'email':
+      return <input type="email" className={cls} value={String(value ?? '')} onChange={e => onChange(e.target.value)} />;
+    case 'url':
+      return <input type="url" className={cls} value={String(value ?? '')} onChange={e => onChange(e.target.value)} />;
+    case 'phone':
+      return <input type="tel" className={cls} value={String(value ?? '')} onChange={e => onChange(e.target.value)} />;
+    case 'color':
+      return <input type="color" className="h-8 w-12 rounded cursor-pointer border border-gray-200"
+        value={String(value ?? '#000000')} onChange={e => onChange(e.target.value)} />;
+    case 'rating':
+      return (
+        <div className="flex gap-0.5">
+          {[1,2,3,4,5].map(n => (
+            <button key={n} type="button"
+              className={`text-lg ${Number(value) >= n ? 'text-yellow-400' : 'text-gray-300'}`}
+              onClick={() => onChange(n)}>★</button>
+          ))}
+        </div>
+      );
     case 'api_select':
       return <SubFormApiSelectCell field={field} value={value} onChange={onChange} />;
     case 'dependent_select':
@@ -1131,7 +1359,7 @@ function SubFormField({ field, value, error, onChange, onExtraUpdate }: FieldRen
           <table className="w-full text-sm">
             <thead className="bg-gray-50 border-b border-gray-200">
               <tr>
-                {subFields.map(f => (
+                {subFields.filter(f => !f.hidden).map(f => (
                   <th key={f.key} className="text-left px-3 py-2 text-xs font-semibold text-gray-600 whitespace-nowrap">
                     {f.label}{f.required && <span className="text-red-400 ml-0.5">*</span>}
                   </th>
@@ -1142,7 +1370,7 @@ function SubFormField({ field, value, error, onChange, onExtraUpdate }: FieldRen
             <tbody>
               {rows.map((row, ri) => (
                 <tr key={ri} className="border-b border-gray-100 last:border-0">
-                  {subFields.map(sf => (
+                  {subFields.filter(f => !f.hidden).map(sf => (
                     <td key={sf.key} className="px-3 py-1.5">
                       <SubFormCellRenderer field={sf} value={row[sf.key]}
                         onChange={val => updCell(ri, sf.key, val)}
@@ -1162,7 +1390,7 @@ function SubFormField({ field, value, error, onChange, onExtraUpdate }: FieldRen
             {rows.length > 0 && subFields.some(sf => sf.sum_to_main) && (
               <tfoot className="bg-violet-50 border-t-2 border-violet-200">
                 <tr>
-                  {subFields.map(sf => {
+                  {subFields.filter(f => !f.hidden).map(sf => {
                     if (!sf.sum_to_main || (sf.type !== 'number' && sf.type !== 'currency')) {
                       return <td key={sf.key} className="px-3 py-1.5" />;
                     }
@@ -1357,6 +1585,13 @@ function FieldRenderer({ field, value, error, onChange, allValues, onExtraUpdate
             <FieldLookupTextField
               field={field} value={value} error={error}
               onChange={onChange} allValues={allValues} mode={mode} formFields={formFields}
+            />
+          );
+        }
+        if (field.value_source === 'conditional') {
+          return (
+            <ConditionalField
+              field={field} value={value} error={error} onChange={onChange} allValues={allValues}
             />
           );
         }
