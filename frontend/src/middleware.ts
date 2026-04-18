@@ -75,11 +75,9 @@ export const config = {
   matcher: [
     /*
      * Match all paths except:
-     * - _next/static (static files)
-     * - _next/image  (image optimisation)
+     * - _next/* (all Next.js internals: static, image, RSC data, etc.)
      * - favicon.ico, robots.txt, sitemap.xml
-     * - /api/*       (backend proxy — not used here but safe to skip)
      */
-    '/((?!_next/static|_next/image|favicon.ico|robots.txt|sitemap.xml).*)',
+    '/((?!_next|favicon.ico|robots.txt|sitemap.xml).*)',
   ],
 };

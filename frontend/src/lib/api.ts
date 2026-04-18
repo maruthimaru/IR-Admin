@@ -14,7 +14,7 @@ const api: AxiosInstance = axios.create({
   timeout: 30000,
 });
 
-// Request interceptor - attach JWT token
+// Request interceptor - attach JWT token + X-Tenant header
 api.interceptors.request.use(
   (config: InternalAxiosRequestConfig) => {
     if (typeof window !== 'undefined') {
@@ -22,6 +22,17 @@ api.interceptors.request.use(
       if (token) {
         config.headers.Authorization = `Bearer ${token}`;
       }
+      // Attach tenant subdomain for local dev (where subdomain routing isn't active)
+      try {
+        const tenantRaw = localStorage.getItem('tenant-storage');
+        if (tenantRaw) {
+          const tenantState = JSON.parse(tenantRaw);
+          const subdomain = tenantState?.state?.company?.subdomain;
+          if (subdomain) {
+            config.headers['X-Tenant'] = subdomain;
+          }
+        }
+      } catch { /* ignore */ }
     }
     return config;
   },
@@ -114,12 +125,17 @@ export const dashboardAPI = {
 };
 
 export const formsAPI = {
+  // Config CRUD
   listConfigs: (params?: object) =>
     api.get('/forms/configs/', { params }),
   createConfig: (data: object) =>
     api.post('/forms/configs/', data),
   getConfig: (formName: string) =>
     api.get(`/forms/configs/${formName}/`),
+  updateConfig: (formName: string, data: object) =>
+    api.put(`/forms/configs/${formName}/`, data),
+  deleteConfig: (formName: string) =>
+    api.delete(`/forms/configs/${formName}/`),
 
   // Records (runtime data)
   listRecords: (formName: string, params?: object) =>
@@ -133,9 +149,35 @@ export const formsAPI = {
   deleteRecord: (formName: string, recordId: string) =>
     api.delete(`/forms/records/${formName}/${recordId}/`),
 
+  // Bulk operations
+  bulkUpdateRecords: (formName: string, recordIds: string[], updates: object) =>
+    api.patch(`/forms/records/${formName}/bulk-update/`, { record_ids: recordIds, updates }),
+  bulkDeleteRecords: (formName: string, recordIds: string[]) =>
+    api.delete(`/forms/records/${formName}/bulk-delete/`, { data: { record_ids: recordIds } }),
+
+  // Export / Import
+  exportRecords: (formName: string) =>
+    api.get(`/forms/records/${formName}/export/`, { responseType: 'blob' }),
+  importRecords: (formName: string, file: File) => {
+    const formData = new FormData();
+    formData.append('file', file);
+    return api.post(`/forms/records/${formName}/import/`, formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    });
+  },
+
   // List page
   getListPageData: (pageName: string, params?: object) =>
     api.get(`/forms/list-page/${pageName}/`, { params }),
+};
+
+export const reportsAPI = {
+  list:    (params?: object) => api.get('/forms/reports/', { params }),
+  create:  (data: object)   => api.post('/forms/reports/', data),
+  get:     (name: string)   => api.get(`/forms/reports/${name}/`),
+  update:  (name: string, data: object) => api.put(`/forms/reports/${name}/`, data),
+  delete:  (name: string)   => api.delete(`/forms/reports/${name}/`),
+  getData: (name: string, params?: object) => api.get(`/forms/reports/${name}/data/`, { params }),
 };
 
 export const integrationsAPI = {

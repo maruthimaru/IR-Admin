@@ -1,98 +1,28 @@
 'use client';
 
-import { useParams, useRouter } from 'next/navigation';
+import Link from 'next/link';
+import { useParams } from 'next/navigation';
 import { useAuthStore } from '@/store/auth';
 import { useTenantStore } from '@/store/tenant';
-import { authAPI } from '@/lib/api';
+import TenantShell from '@/components/tenant/TenantShell';
 import {
-  Building2, LogOut, LayoutDashboard, FileText,
-  Users, Settings, Globe,
+  FileText, LayoutDashboard, Users, Settings,
 } from 'lucide-react';
 
 export default function TenantDashboardPage() {
   const params    = useParams();
-  const router    = useRouter();
   const subdomain = params.tenant as string;
 
-  const { user, isAuthenticated, logout } = useAuthStore();
-  const { company, clearCompany }         = useTenantStore();
-
-  // Auth is handled by [tenant]/layout.tsx
-
-  const handleLogout = async () => {
-    try {
-      const refresh = localStorage.getItem('refresh_token') ?? '';
-      await authAPI.logout(refresh);
-    } catch { /* ignore */ }
-    logout();
-    clearCompany();
-    router.push(`/${subdomain}/login`);
-  };
+  const { user, isAuthenticated } = useAuthStore();
+  const { company }               = useTenantStore();
 
   if (!user || !isAuthenticated) return null;
 
   const companyName = company?.name ?? subdomain;
 
   return (
-    <div className="min-h-screen bg-gray-50 flex">
-      {/* Sidebar */}
-      <aside className="w-60 bg-slate-900 text-white flex flex-col shrink-0">
-        {/* Brand */}
-        <div className="p-5 border-b border-slate-700">
-          <div className="flex items-center gap-3">
-            <div className="w-9 h-9 bg-indigo-600 rounded-xl flex items-center justify-center shrink-0">
-              <Building2 size={16} />
-            </div>
-            <div className="min-w-0">
-              <p className="font-semibold text-sm truncate">{companyName}</p>
-              <p className="text-xs text-slate-400 font-mono truncate">{subdomain}</p>
-            </div>
-          </div>
-        </div>
-
-        {/* Nav */}
-        <nav className="flex-1 p-4 space-y-1">
-          {[
-            { icon: LayoutDashboard, label: 'Dashboard',  href: `/${subdomain}/dashboard` },
-            { icon: FileText,        label: 'Forms',       href: `/${subdomain}/developer/forms` },
-            { icon: Users,           label: 'Users',       href: `/${subdomain}/users` },
-            { icon: Globe,           label: 'Pages',       href: `/${subdomain}/developer/pages` },
-            { icon: Settings,        label: 'Settings',    href: `/${subdomain}/settings` },
-          ].map(({ icon: Icon, label, href }) => (
-            <a
-              key={label}
-              href={href}
-              className="flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm text-slate-300 hover:bg-slate-800 hover:text-white transition-colors"
-            >
-              <Icon size={16} />
-              {label}
-            </a>
-          ))}
-        </nav>
-
-        {/* User */}
-        <div className="p-4 border-t border-slate-700">
-          <div className="flex items-center gap-3 mb-3">
-            <div className="w-8 h-8 bg-indigo-600 rounded-full flex items-center justify-center text-xs font-semibold shrink-0">
-              {user.first_name?.[0]?.toUpperCase() ?? user.email[0].toUpperCase()}
-            </div>
-            <div className="min-w-0">
-              <p className="text-sm font-medium truncate">{user.first_name} {user.last_name}</p>
-              <p className="text-xs text-slate-400 capitalize">{user.role.replace('_', ' ')}</p>
-            </div>
-          </div>
-          <button
-            onClick={handleLogout}
-            className="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm text-slate-400 hover:bg-slate-800 hover:text-white transition-colors"
-          >
-            <LogOut size={14} />
-            Sign out
-          </button>
-        </div>
-      </aside>
-
-      {/* Main */}
-      <main className="flex-1 p-8 overflow-auto">
+    <TenantShell>
+      <div className="p-8 overflow-auto">
         <div className="max-w-5xl mx-auto space-y-6">
 
           {/* Header */}
@@ -138,20 +68,20 @@ export default function TenantDashboardPage() {
                 { label: 'Manage Users',  href: `/${subdomain}/users`,           icon: Users },
                 { label: 'Settings',      href: `/${subdomain}/settings`,        icon: Settings },
               ].map(({ label, href, icon: Icon }) => (
-                <a
+                <Link
                   key={label}
                   href={href}
                   className="flex items-center gap-2 px-4 py-3 border border-gray-200 rounded-lg text-sm text-gray-700 hover:bg-gray-50 hover:border-indigo-300 transition-colors"
                 >
                   <Icon size={15} className="text-indigo-500" />
                   {label}
-                </a>
+                </Link>
               ))}
             </div>
           </div>
 
         </div>
-      </main>
-    </div>
+      </div>
+    </TenantShell>
   );
 }

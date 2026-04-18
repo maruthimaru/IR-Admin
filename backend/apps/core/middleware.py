@@ -83,8 +83,28 @@ class TenantMiddleware:
 
 
 def get_tenant_db_name(request) -> str:
-    """Helper to get tenant db name from request."""
-    return getattr(request, 'tenant_db_name', None)
+    """
+    Get tenant db name from request.
+    Priority: middleware-resolved (subdomain) → X-Tenant header (dev / direct API).
+    """
+    if getattr(request, 'tenant_db_name', None):
+        return request.tenant_db_name
+
+    # Support explicit header for local dev where subdomain routing isn't active
+    tenant_header = request.META.get('HTTP_X_TENANT', '').strip().lower()
+    if tenant_header:
+        try:
+            from apps.utils.mongodb import get_main_db
+            db = get_main_db()
+            company = db['companies'].find_one(
+                {'subdomain': tenant_header, 'is_active': True}
+            )
+            if company:
+                return company.get('db_name')
+        except Exception:
+            pass
+
+    return None
 
 
 def require_tenant(view_func):

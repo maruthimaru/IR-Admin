@@ -35,14 +35,20 @@ export default function TenantLoginPage() {
     resolver: zodResolver(schema),
   });
 
-  // Redirect if already logged in to this tenant
+  // Redirect if already logged in to this tenant.
+  // Guard with a small delay so we don't fire during a mid-logout state flush.
   useEffect(() => {
-    if (isAuthenticated && user && user.role !== 'super_admin') {
-      const companyId = storedCompany?._id;
-      if (companyId) {
-        router.replace(`/${subdomain}/dashboard`);
+    const timer = setTimeout(() => {
+      if (isAuthenticated && user && user.role !== 'super_admin') {
+        const tenantCompanyId = storedCompany?._id;
+        const userCompanyId   = user.company_id;
+        // Only redirect if the stored company actually matches the user
+        if (tenantCompanyId && userCompanyId && tenantCompanyId === userCompanyId) {
+          router.replace(`/${subdomain}/dashboard`);
+        }
       }
-    }
+    }, 100);
+    return () => clearTimeout(timer);
   }, [isAuthenticated, user, storedCompany, subdomain, router]);
 
   // Load company name to display on the login page

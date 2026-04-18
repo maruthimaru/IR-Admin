@@ -2,38 +2,39 @@
 Dynamic Form Engine - The Core of the Admin Panel
 Handles form configuration, field management, and runtime data operations
 """
+import csv
+import io
 import logging
 import datetime
 from bson import ObjectId
+from pymongo.errors import DuplicateKeyError
 from rest_framework import status
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
+from django.http import HttpResponse
 
 from apps.utils.mongodb import get_tenant_db
 from apps.core.middleware import get_tenant_db_name
 
 logger = logging.getLogger(__name__)
 
+ALLOWED_FIELD_TYPES = [
+    'text', 'number', 'email', 'phone', 'date', 'datetime', 'time',
+    'select', 'multi_select', 'checkbox', 'radio', 'textarea',
+    'file', 'image', 'currency', 'percentage', 'url', 'color',
+    'rating', 'switch', 'hidden', 'formula', 'relation',
+    'api_select', 'dependent_select', 'uid', 'sub_form',
+]
+
+
 # ──────────────────────────────────────────────
 # FORM CONFIGURATION (Developer Panel)
 # ──────────────────────────────────────────────
 
-ALLOWED_FIELD_TYPES = [
-    'text', 'number', 'email', 'phone', 'date', 'datetime',
-    'select', 'multi_select', 'checkbox', 'radio', 'textarea',
-    'file', 'image', 'currency', 'percentage', 'url', 'color',
-    'rating', 'switch', 'hidden', 'formula', 'relation'
-]
-
-
 @api_view(['GET', 'POST'])
 @permission_classes([IsAuthenticated])
 def form_configs(request):
-    """
-    GET  - List all form configurations for a tenant
-    POST - Create a new form configuration
-    """
     db_name = get_tenant_db_name(request)
     if not db_name:
         return Response({'error': 'Tenant context required'}, status=status.HTTP_400_BAD_REQUEST)
@@ -41,57 +42,107 @@ def form_configs(request):
     db = get_tenant_db(db_name)
 
     if request.method == 'GET':
-        page = int(request.GET.get('page', 1))
-        page_size = int(request.GET.get('page_size', 20))
-        form_type = request.GET.get('type', None)  # 'input' or 'list'
-
+        form_type = request.GET.get('type')
         query = {}
         if form_type:
             query['type'] = form_type
 
-        forms = list(db['dynamic_forms'].find(query)
-                     .skip((page - 1) * page_size)
-                     .limit(page_size)
-                     .sort('created_at', -1))
-
+        forms = list(db['dynamic_forms'].find(query).sort('created_at', -1))
         for f in forms:
             f['_id'] = str(f['_id'])
+            if isinstance(f.get('created_at'), datetime.datetime):
+                f['created_at'] = f['created_at'].isoformat()
 
-        return Response({
-            'results': forms,
-            'total': db['dynamic_forms'].count_documents(query),
-        })
+        return Response({'results': forms, 'total': len(forms)})
 
     elif request.method == 'POST':
         return _create_form_config(request, db)
 
 
+@api_view(['GET', 'PUT', 'DELETE'])
+@permission_classes([IsAuthenticated])
+def form_config_detail(request, form_name):
+    db_name = get_tenant_db_name(request)
+    if not db_name:
+        return Response({'error': 'Tenant context required'}, status=status.HTTP_400_BAD_REQUEST)
+
+    db = get_tenant_db(db_name)
+    form = db['dynamic_forms'].find_one({'form_name': form_name})
+    if not form:
+        return Response({'error': 'Form not found'}, status=status.HTTP_404_NOT_FOUND)
+
+    if request.method == 'GET':
+        form['_id'] = str(form['_id'])
+        if isinstance(form.get('created_at'), datetime.datetime):
+            form['created_at'] = form['created_at'].isoformat()
+        return Response(form)
+
+    elif request.method == 'PUT':
+        data = request.data
+        update = {'updated_at': datetime.datetime.utcnow()}
+
+        if 'display_name' in data:
+            update['display_name'] = data['display_name']
+        if 'category' in data:
+            update['category'] = data['category']
+        if 'layout' in data:
+            update['layout'] = data['layout']
+        if 'fields' in data:
+            validated = _validate_fields(data['fields'])
+            if isinstance(validated, Response):
+                return validated
+            update['fields'] = validated
+            # Re-setup indexes
+            collection_name = f"records_{form_name}"
+            _setup_form_collection(db, collection_name, validated)
+        if 'settings' in data:
+            update['settings'] = data['settings']
+
+        db['dynamic_forms'].update_one({'form_name': form_name}, {'$set': update})
+
+        # Update the linked list page columns and footer if fields changed
+        if 'fields' in data:
+            list_page_name = f"{form_name}_list"
+            list_page = db['dynamic_forms'].find_one({'form_name': list_page_name, 'type': 'list'})
+            if list_page:
+                new_cols = [f['key'] for f in update['fields']]
+                new_footer = {
+                    f['key']: 'sum'
+                    for f in update['fields']
+                    if f.get('show_footer_sum') and f['type'] in ('number', 'currency')
+                }
+                db['dynamic_forms'].update_one(
+                    {'form_name': list_page_name},
+                    {'$set': {
+                        'columns': new_cols,
+                        'footer': new_footer,
+                        'updated_at': datetime.datetime.utcnow(),
+                    }}
+                )
+
+        return Response({'message': f'Form "{form_name}" updated successfully'})
+
+    elif request.method == 'DELETE':
+        # Delete config, linked list page, and data collection
+        db['dynamic_forms'].delete_one({'form_name': form_name})
+        db['dynamic_forms'].delete_many({'form_ref': form_name, 'type': 'list'})
+        collection_name = f"records_{form_name}"
+        db[collection_name].drop()
+        logger.info(f"Form deleted: {form_name}")
+        return Response({'message': f'Form "{form_name}" deleted'})
+
+
 def _create_form_config(request, db):
-    """Create a new input or list form configuration."""
     data = request.data
     form_type = data.get('type', 'input')
-
     if form_type == 'input':
         return _create_input_form(data, db, request.user)
     elif form_type == 'list':
         return _create_list_page(data, db, request.user)
-    else:
-        return Response({'error': f'Invalid form type: {form_type}'}, status=400)
+    return Response({'error': f'Invalid form type: {form_type}'}, status=400)
 
 
 def _create_input_form(data: dict, db, user) -> Response:
-    """
-    Create an input form configuration.
-    Example config:
-    {
-        "form_name": "purchase_entry",
-        "type": "input",
-        "fields": [
-            {"label": "Item Name", "key": "item_name", "type": "text", "required": true},
-            {"label": "Weight", "key": "weight", "type": "number"}
-        ]
-    }
-    """
     form_name = data.get('form_name', '').strip().lower().replace(' ', '_')
     if not form_name:
         return Response({'error': 'form_name is required'}, status=400)
@@ -104,316 +155,403 @@ def _create_input_form(data: dict, db, user) -> Response:
     if isinstance(validated_fields, Response):
         return validated_fields
 
+    display_name = data.get('display_name', form_name.replace('_', ' ').title())
+    now = datetime.datetime.utcnow()
+
     form_config = {
-        'form_name': form_name,
-        'display_name': data.get('display_name', form_name.replace('_', ' ').title()),
-        'type': 'input',
-        'fields': validated_fields,
+        'form_name':    form_name,
+        'display_name': display_name,
+        'category':     data.get('category', ''),
+        'type':         'input',
+        'fields':       validated_fields,
         'settings': {
-            'allow_edit': data.get('allow_edit', True),
-            'allow_delete': data.get('allow_delete', True),
-            'require_confirmation': data.get('require_confirmation', False),
-            'max_records': data.get('max_records', None),
+            'allow_edit':             data.get('allow_edit', True),
+            'allow_delete':           data.get('allow_delete', True),
+            'require_confirmation':   data.get('require_confirmation', False),
+            'max_records':            data.get('max_records', None),
         },
-        'layout': data.get('layout', 'vertical'),  # vertical, horizontal, grid
-        'hooks': {
-            'before_save': data.get('before_save_hook', None),
-            'after_save': data.get('after_save_hook', None),
-        },
-        'permissions': data.get('permissions', {'roles': ['all']}),
+        'layout':     data.get('layout', 'vertical'),
+        'hooks':      {'before_save': None, 'after_save': None},
+        'permissions': {'roles': ['all']},
         'created_by': str(user.id),
-        'created_at': datetime.datetime.utcnow(),
-        'updated_at': datetime.datetime.utcnow(),
-        'is_active': True,
+        'created_at': now,
+        'updated_at': now,
+        'is_active':  True,
     }
 
     result = db['dynamic_forms'].insert_one(form_config)
     form_config['_id'] = str(result.inserted_id)
 
-    # Auto-create the data collection for this form
     collection_name = f"records_{form_name}"
     _setup_form_collection(db, collection_name, validated_fields)
 
+    # ── Auto-create paired list page ──────────────────────────────
+    list_page_name = f"{form_name}_list"
+    if not db['dynamic_forms'].find_one({'form_name': list_page_name}):
+        list_config = {
+            'form_name':    list_page_name,
+            'display_name': f"{display_name} List",
+            'type':         'list',
+            'form_ref':     form_name,
+            'columns':      [f['key'] for f in validated_fields],
+            'footer':       {
+                f['key']: 'sum'
+                for f in validated_fields
+                if f.get('show_footer_sum') and f['type'] in ('number', 'currency')
+            },
+            'actions':      ['edit', 'delete'],
+            'filters':      [f['key'] for f in validated_fields if f['type'] in (
+                'select', 'radio', 'date', 'boolean', 'switch', 'checkbox'
+            )],
+            'sorting':    {'field': 'created_at', 'order': 'desc'},
+            'pagination': {'enabled': True, 'page_size': 20},
+            'search':     {'enabled': True, 'fields': [
+                f['key'] for f in validated_fields if f.get('is_searchable')
+            ]},
+            'export':     {'enabled': True, 'formats': ['csv']},
+            'created_by': str(user.id),
+            'created_at': now,
+            'updated_at': now,
+            'is_active':  True,
+        }
+        db['dynamic_forms'].insert_one(list_config)
+
     logger.info(f"Input form created: {form_name}")
     return Response({
-        'message': f'Form "{form_name}" created successfully',
-        'form': form_config,
+        'message':    f'Form "{form_name}" created successfully',
+        'form':       form_config,
         'collection': collection_name,
+        'list_page':  list_page_name,
     }, status=201)
 
 
 def _create_list_page(data: dict, db, user) -> Response:
-    """
-    Create a list page configuration.
-    Example:
-    {
-        "page_type": "list",
-        "form_ref": "purchase_entry",
-        "columns": ["item_name", "weight"],
-        "footer": {"weight": "sum"},
-        "actions": ["edit", "delete"]
-    }
-    """
     form_ref = data.get('form_ref', '').strip()
     if not form_ref:
         return Response({'error': 'form_ref is required for list pages'}, status=400)
 
-    # Verify the referenced form exists
     source_form = db['dynamic_forms'].find_one({'form_name': form_ref, 'type': 'input'})
     if not source_form:
         return Response({'error': f'Source form "{form_ref}" not found'}, status=404)
 
     page_name = data.get('page_name', f'{form_ref}_list')
-    columns = data.get('columns', [])
-    footer = data.get('footer', {})  # e.g., {"weight": "sum", "price": "avg"}
-    actions = data.get('actions', ['edit', 'delete'])
-
-    # Validate footer aggregations
-    valid_agg = ['sum', 'avg', 'min', 'max', 'count']
-    for col, agg in footer.items():
-        if agg not in valid_agg:
-            return Response({'error': f'Invalid footer aggregation "{agg}" for column "{col}"'}, status=400)
-
-    list_config = {
-        'form_name': page_name,
-        'display_name': data.get('display_name', page_name.replace('_', ' ').title()),
-        'type': 'list',
-        'form_ref': form_ref,
-        'columns': columns,
-        'footer': footer,
-        'actions': actions,
-        'filters': data.get('filters', []),  # Configurable filter fields
-        'sorting': data.get('sorting', {'field': 'created_at', 'order': 'desc'}),
-        'pagination': data.get('pagination', {'enabled': True, 'page_size': 20}),
-        'search': data.get('search', {'enabled': True, 'fields': []}),
-        'export': data.get('export', {'enabled': True, 'formats': ['csv', 'excel']}),
-        'created_by': str(user.id),
-        'created_at': datetime.datetime.utcnow(),
-        'updated_at': datetime.datetime.utcnow(),
-        'is_active': True,
-    }
-
     if db['dynamic_forms'].find_one({'form_name': page_name, 'type': 'list'}):
         return Response({'error': f'List page "{page_name}" already exists'}, status=409)
 
+    footer = data.get('footer', {})
+    for col, agg in footer.items():
+        if agg not in ('sum', 'avg', 'min', 'max', 'count'):
+            return Response({'error': f'Invalid aggregation "{agg}" for "{col}"'}, status=400)
+
+    now = datetime.datetime.utcnow()
+    list_config = {
+        'form_name':    page_name,
+        'display_name': data.get('display_name', page_name.replace('_', ' ').title()),
+        'type':         'list',
+        'form_ref':     form_ref,
+        'columns':      data.get('columns', [f['key'] for f in source_form.get('fields', [])]),
+        'footer':       footer,
+        'actions':      data.get('actions', ['edit', 'delete']),
+        'filters':      data.get('filters', []),
+        'sorting':      data.get('sorting', {'field': 'created_at', 'order': 'desc'}),
+        'pagination':   data.get('pagination', {'enabled': True, 'page_size': 20}),
+        'search':       data.get('search', {'enabled': True, 'fields': []}),
+        'export':       {'enabled': True, 'formats': ['csv']},
+        'created_by': str(user.id),
+        'created_at': now,
+        'updated_at': now,
+        'is_active':  True,
+    }
+
     result = db['dynamic_forms'].insert_one(list_config)
     list_config['_id'] = str(result.inserted_id)
-
-    logger.info(f"List page created: {page_name} → {form_ref}")
-    return Response({
-        'message': f'List page "{page_name}" created successfully',
-        'page': list_config,
-    }, status=201)
+    logger.info(f"List page created: {page_name}")
+    return Response({'message': f'List page "{page_name}" created', 'page': list_config}, status=201)
 
 
-def _validate_fields(fields: list) -> list | Response:
-    """Validate field definitions for a form."""
+def _validate_fields(fields: list):
     if not fields:
         return Response({'error': 'At least one field is required'}, status=400)
 
-    validated = []
-    keys_seen = set()
-
+    validated, keys_seen = [], set()
     for i, field in enumerate(fields):
-        label = field.get('label', '').strip()
-        key = field.get('key', label.lower().replace(' ', '_')).strip()
+        label      = field.get('label', '').strip()
+        key        = field.get('key', label.lower().replace(' ', '_')).strip()
         field_type = field.get('type', 'text')
 
         if not label:
             return Response({'error': f'Field {i+1}: label is required'}, status=400)
-
-        if not key:
-            return Response({'error': f'Field {i+1}: key is required'}, status=400)
-
         if field_type not in ALLOWED_FIELD_TYPES:
-            return Response(
-                {'error': f'Field "{key}": invalid type "{field_type}". Allowed: {ALLOWED_FIELD_TYPES}'},
-                status=400
-            )
-
+            return Response({'error': f'Invalid type "{field_type}"'}, status=400)
         if key in keys_seen:
             return Response({'error': f'Duplicate field key: "{key}"'}, status=400)
         keys_seen.add(key)
 
-        validated_field = {
-            'label': label,
-            'key': key,
-            'type': field_type,
-            'required': field.get('required', False),
-            'placeholder': field.get('placeholder', ''),
-            'default_value': field.get('default_value', None),
-            'options': field.get('options', []),  # For select/radio
+        validated.append({
+            'label':          label,
+            'key':            key,
+            'type':           field_type,
+            'required':       field.get('required', False),
+            'placeholder':    field.get('placeholder', ''),
+            'default_value':  field.get('default_value', None),
+            'options':        field.get('options', []),
             'validation': {
-                'min': field.get('min', None),
-                'max': field.get('max', None),
-                'min_length': field.get('min_length', None),
-                'max_length': field.get('max_length', None),
-                'pattern': field.get('pattern', None),
+                'min':            field.get('min', None),
+                'max':            field.get('max', None),
+                'min_length':     field.get('min_length', None),
+                'max_length':     field.get('max_length', None),
+                'pattern':        field.get('pattern', None),
                 'custom_message': field.get('validation_message', None),
             },
-            'order': field.get('order', i),
-            'width': field.get('width', 'full'),  # full, half, third
-            'help_text': field.get('help_text', ''),
-            'is_searchable': field.get('is_searchable', False),
-            'is_sortable': field.get('is_sortable', False),
-            'hidden': field.get('hidden', False),
-        }
-        validated.append(validated_field)
-
+            'order':          field.get('order', i),
+            'width':          field.get('width', 'full'),
+            'help_text':      field.get('help_text', ''),
+            'is_searchable':   field.get('is_searchable', False),
+            'is_sortable':     field.get('is_sortable', False),
+            'show_footer_sum': field.get('show_footer_sum', False),
+            'hidden':          field.get('hidden', False),
+            # API-driven select config
+            'api_url':           field.get('api_url', ''),
+            'api_method':        field.get('api_method', 'GET'),
+            'response_path':     field.get('response_path', 'data'),
+            'display_key':       field.get('display_key', 'name'),
+            'value_key':         field.get('value_key', 'id'),
+            # Auth
+            'api_auth_type':     field.get('api_auth_type', 'none'),
+            'api_auth_token':    field.get('api_auth_token', ''),
+            'api_auth_username': field.get('api_auth_username', ''),
+            'api_auth_password': field.get('api_auth_password', ''),
+            # POST body
+            'api_body':          field.get('api_body', ''),
+            # Dependent select config
+            'depends_on':        field.get('depends_on', ''),
+            'filter_key':        field.get('filter_key', ''),
+            # Searchable combobox & value source (number/currency)
+            'searchable_dropdown': field.get('searchable_dropdown', False),
+            # api_select / dependent_select data source
+            'api_source':  field.get('api_source', 'url'),
+            'source_form': field.get('source_form', ''),
+            'value_source':        field.get('value_source', 'manual'),
+            'formula':             field.get('formula', ''),
+            # Uniqueness constraint
+            'is_unique':           field.get('is_unique', False),
+            # API select — label key stored for list display
+            'table_value_key':     field.get('table_value_key', ''),
+            # Date/datetime/time display format, per-field timezone & default
+            'date_format':         field.get('date_format', 'DD/MM/YYYY'),
+            'time_format':         field.get('time_format', '24h'),
+            'field_timezone':      field.get('field_timezone', ''),
+            'default_now':         field.get('default_now', False),
+            # Inline edit in list view
+            'edit_on_list':        field.get('edit_on_list', False),
+            # Combined text field template
+            'combined_template':   field.get('combined_template', ''),
+            # Sub-form fields (nested field definitions)
+            'sub_form_fields':     field.get('sub_form_fields', []),
+            # Field lookup (auto-populate text field from a form-source dropdown)
+            'lookup_field_key':    field.get('lookup_field_key', ''),
+            'lookup_source_field': field.get('lookup_source_field', ''),
+        })
     return validated
 
 
 def _setup_form_collection(db, collection_name: str, fields: list):
-    """Create indexes for the form's data collection."""
     collection = db[collection_name]
-
-    # Always create a created_at index for sorting
     collection.create_index([('created_at', -1)])
 
-    # Create indexes for searchable/sortable fields
+    # Fields that currently want a unique constraint
+    unique_keys = {f['key'] for f in fields if f.get('is_unique') and f.get('type') != 'uid'}
+
+    # Drop any existing unique indexes whose field is no longer marked is_unique
+    try:
+        for idx_name, idx_info in collection.index_information().items():
+            if idx_name == '_id_' or not idx_info.get('unique', False):
+                continue
+            idx_fields = [k for k, _ in idx_info.get('key', [])]
+            if any(k not in unique_keys for k in idx_fields):
+                collection.drop_index(idx_name)
+    except Exception:
+        pass
+
     for field in fields:
-        if field.get('is_searchable') or field.get('is_sortable'):
+        if field.get('is_unique') and field.get('type') != 'uid':
+            collection.create_index(field['key'], unique=True, sparse=True)
+        elif field.get('is_searchable') or field.get('is_sortable'):
             collection.create_index(field['key'])
 
 
+def _extract_duplicate_field(exc: DuplicateKeyError, fields: list) -> str:
+    """Try to extract a human-readable field key from a DuplicateKeyError message."""
+    import re
+    msg = str(exc)
+    # pymongo error message contains the index key, e.g. 'index: email_1'
+    match = re.search(r'index:\s*\S*?(\w+)_\d+', msg)
+    if match:
+        candidate = match.group(1)
+        for f in fields:
+            if f['key'] == candidate:
+                return candidate
+    return 'value'
+
+
+def _get_next_uid(db, collection_name: str, field_key: str) -> int:
+    """Return the next auto-increment integer UID for the given field."""
+    last = db[collection_name].find_one(
+        {field_key: {'$exists': True}},
+        sort=[(field_key, -1)],
+    )
+    if last and isinstance(last.get(field_key), (int, float)):
+        return int(last[field_key]) + 1
+    return 1
+
+
 # ──────────────────────────────────────────────
-# RUNTIME DATA API (End Users)
+# RUNTIME DATA API
 # ──────────────────────────────────────────────
 
 @api_view(['GET', 'POST'])
 @permission_classes([IsAuthenticated])
 def form_records(request, form_name):
-    """
-    GET  - List records for a form
-    POST - Create a new record
-    """
     db_name = get_tenant_db_name(request)
     if not db_name:
         return Response({'error': 'Tenant context required'}, status=400)
 
     db = get_tenant_db(db_name)
-
-    # Get form config
     form_config = db['dynamic_forms'].find_one({'form_name': form_name, 'type': 'input'})
     if not form_config:
         return Response({'error': f'Form "{form_name}" not found'}, status=404)
 
     collection_name = f"records_{form_name}"
-
     if request.method == 'GET':
         return _list_records(request, db, collection_name, form_config)
-    elif request.method == 'POST':
-        return _create_record(request, db, collection_name, form_config)
+    return _create_record(request, db, collection_name, form_config)
 
 
-def _list_records(request, db, collection_name: str, form_config: dict) -> Response:
-    """Fetch records with pagination, filtering, and sorting."""
-    page = int(request.GET.get('page', 1))
+def _list_records(request, db, collection_name, form_config):
+    page      = int(request.GET.get('page', 1))
     page_size = int(request.GET.get('page_size', 20))
-    search = request.GET.get('search', '')
-    sort_by = request.GET.get('sort_by', 'created_at')
+    search    = request.GET.get('search', '')
+    sort_by   = request.GET.get('sort_by', 'created_at')
     sort_order = -1 if request.GET.get('sort_order', 'desc') == 'desc' else 1
 
     query = {}
-
-    # Apply search
     if search:
-        searchable_fields = [f['key'] for f in form_config.get('fields', [])
-                             if f.get('is_searchable')]
-        if searchable_fields:
-            query['$or'] = [
-                {field: {'$regex': search, '$options': 'i'}}
-                for field in searchable_fields
-            ]
+        searchable = [f['key'] for f in form_config.get('fields', []) if f.get('is_searchable')]
+        if searchable:
+            query['$or'] = [{'$regex': search, '$options': 'i'} and {field: {'$regex': search, '$options': 'i'}}
+                            for field in searchable]
+            query['$or'] = [{field: {'$regex': search, '$options': 'i'}} for field in searchable]
 
-    # Apply filters from query params
+    # Per-field filters from query params
     for field in form_config.get('fields', []):
-        key = field['key']
-        filter_val = request.GET.get(f'filter_{key}')
-        if filter_val:
-            query[key] = filter_val
+        key   = field['key']
+        ftype = field.get('type', 'text')
+        val   = request.GET.get(f'filter_{key}')
+        if val:
+            if ftype in ('number', 'currency', 'percentage', 'uid'):
+                try:
+                    query[key] = int(val) if '.' not in val else float(val)
+                except (ValueError, TypeError):
+                    query[key] = val
+            else:
+                query[key] = val
+        # Date / datetime / time range filters
+        if ftype in ('date', 'datetime', 'time'):
+            gte = request.GET.get(f'filter_{key}_gte')
+            lte = request.GET.get(f'filter_{key}_lte')
+            if gte or lte:
+                query[key] = {}
+                if gte:
+                    query[key]['$gte'] = gte
+                if lte:
+                    query[key]['$lte'] = lte
 
-    total = db[collection_name].count_documents(query)
-    records = list(
-        db[collection_name].find(query)
-        .sort(sort_by, sort_order)
-        .skip((page - 1) * page_size)
-        .limit(page_size)
-    )
-
+    total   = db[collection_name].count_documents(query)
+    records = list(db[collection_name].find(query)
+                   .sort(sort_by, sort_order)
+                   .skip((page - 1) * page_size)
+                   .limit(page_size))
     for r in records:
         r['_id'] = str(r['_id'])
+        for k, v in r.items():
+            if isinstance(v, datetime.datetime):
+                r[k] = v.isoformat()
 
-    # Compute footer aggregations if this is for a list page
-    footer_data = {}
-
-    return Response({
-        'results': records,
-        'total': total,
-        'page': page,
-        'page_size': page_size,
-        'footer': footer_data,
-    })
+    return Response({'results': records, 'total': total, 'page': page, 'page_size': page_size})
 
 
-def _create_record(request, db, collection_name: str, form_config: dict) -> Response:
-    """Create a new record with validation."""
-    data = request.data
-    fields = form_config.get('fields', [])
-
-    # Validate against form config
-    errors = {}
-    validated_data = {}
-
+def _create_record(request, db, collection_name, form_config):
+    fields, errors, validated_data = form_config.get('fields', []), {}, {}
     for field in fields:
-        key = field['key']
-        value = data.get(key)
+        key        = field['key']
         field_type = field['type']
 
-        # Required field check
+        # ── UID: auto-generate, skip user input entirely ──────────
+        if field_type == 'uid':
+            validated_data[key] = _get_next_uid(db, collection_name, key)
+            continue
+
+        value = request.data.get(key)
         if field.get('required') and (value is None or value == ''):
             errors[key] = f"{field['label']} is required"
             continue
-
         if value is None:
             continue
-
-        # Type validation
         try:
             validated_data[key] = _validate_field_value(value, field)
         except ValueError as e:
             errors[key] = str(e)
+            continue
+
+        # ── Combined text field: resolve {{auto_generate}} token ──
+        if field_type == 'text' and field.get('value_source') == 'combined':
+            raw = str(validated_data.get(key, '') or '')
+            if '{{auto_generate}}' in raw:
+                next_num = _get_next_uid(db, collection_name, key)
+                validated_data[key] = raw.replace('{{auto_generate}}', str(next_num))
+
+        # ── Uniqueness check ──────────────────────────────────────
+        if field.get('is_unique') and validated_data.get(key) not in (None, ''):
+            existing = db[collection_name].find_one({key: validated_data[key]})
+            if existing:
+                errors[key] = f"{field['label']}: this value already exists"
 
     if errors:
         return Response({'errors': errors}, status=400)
 
-    # Add metadata
-    validated_data['created_by'] = str(request.user.id)
-    validated_data['created_at'] = datetime.datetime.utcnow()
-    validated_data['updated_at'] = datetime.datetime.utcnow()
+    # Persist table_value_key labels (display labels for api_select / dependent_select).
+    # Stored under "{field_key}_{table_value_key}" to avoid collisions when multiple
+    # fields share the same table_value_key name (e.g. all three using "name").
+    for field in fields:
+        tvk = field.get('table_value_key', '')
+        if tvk and field.get('type') in ('api_select', 'dependent_select'):
+            storage_key = f"{field['key']}_{tvk}"
+            label_val = request.data.get(storage_key)
+            if label_val is not None:
+                validated_data[storage_key] = str(label_val)
 
-    result = db[collection_name].insert_one(validated_data)
+    now = datetime.datetime.utcnow()
+    validated_data.update({'created_by': str(request.user.id), 'created_at': now, 'updated_at': now})
+    try:
+        result = db[collection_name].insert_one(validated_data)
+    except DuplicateKeyError as exc:
+        field_name = _extract_duplicate_field(exc, fields)
+        return Response(
+            {'errors': {field_name: f'{field_name}: this value already exists'}},
+            status=400,
+        )
     validated_data['_id'] = str(result.inserted_id)
 
-    # Audit log
     db['audit_logs'].insert_one({
-        'action': 'create_record',
-        'collection': collection_name,
-        'record_id': str(result.inserted_id),
-        'user_id': str(request.user.id),
-        'created_at': datetime.datetime.utcnow(),
+        'action': 'create_record', 'collection': collection_name,
+        'record_id': str(result.inserted_id), 'user_id': str(request.user.id), 'created_at': now,
     })
-
-    return Response({
-        'message': 'Record created successfully',
-        'record': validated_data,
-    }, status=201)
+    return Response({'message': 'Record created successfully', 'record': validated_data}, status=201)
 
 
 @api_view(['GET', 'PUT', 'DELETE'])
 @permission_classes([IsAuthenticated])
 def record_detail(request, form_name, record_id):
-    """Get, update, or delete a specific record."""
     db_name = get_tenant_db_name(request)
     if not db_name:
         return Response({'error': 'Tenant context required'}, status=400)
@@ -424,12 +562,16 @@ def record_detail(request, form_name, record_id):
     try:
         record = db[collection_name].find_one({'_id': ObjectId(record_id)})
     except Exception:
-        return Response({'error': 'Invalid record ID'}, status=400)
+        # Not a valid ObjectId — try matching any field that stores this plain string value
+        record = db[collection_name].find_one({'_id': record_id})
 
     if not record:
         return Response({'error': 'Record not found'}, status=404)
 
     record['_id'] = str(record['_id'])
+    for k, v in record.items():
+        if isinstance(v, datetime.datetime):
+            record[k] = v.isoformat()
 
     if request.method == 'GET':
         return Response(record)
@@ -437,70 +579,699 @@ def record_detail(request, form_name, record_id):
     elif request.method == 'PUT':
         form_config = db['dynamic_forms'].find_one({'form_name': form_name})
         fields = form_config.get('fields', []) if form_config else []
-
-        update_data = {}
-        errors = {}
+        update_data, errors = {}, {}
 
         for field in fields:
-            key = field['key']
-            if key in request.data:
-                try:
-                    update_data[key] = _validate_field_value(request.data[key], field)
-                except ValueError as e:
-                    errors[key] = str(e)
+            key        = field['key']
+            field_type = field['type']
+
+            # UID fields are immutable — never update them
+            if field_type == 'uid':
+                continue
+
+            if key not in request.data:
+                continue
+
+            try:
+                update_data[key] = _validate_field_value(request.data[key], field)
+            except ValueError as e:
+                errors[key] = str(e)
+                continue
+
+            # Uniqueness check — exclude the record being edited
+            if field.get('is_unique') and update_data.get(key) not in (None, ''):
+                existing = db[collection_name].find_one({
+                    key: update_data[key],
+                    '_id': {'$ne': ObjectId(record_id)},
+                })
+                if existing:
+                    errors[key] = f"{field['label']}: this value already exists"
 
         if errors:
             return Response({'errors': errors}, status=400)
 
-        update_data['updated_at'] = datetime.datetime.utcnow()
-        update_data['updated_by'] = str(request.user.id)
+        # Persist table_value_key labels (display labels for api_select / dependent_select).
+        # Stored under "{field_key}_{table_value_key}" to avoid collisions.
+        for field in fields:
+            tvk = field.get('table_value_key', '')
+            if tvk and field.get('type') in ('api_select', 'dependent_select'):
+                storage_key = f"{field['key']}_{tvk}"
+                if storage_key in request.data:
+                    update_data[storage_key] = str(request.data[storage_key])
 
-        db[collection_name].update_one(
-            {'_id': ObjectId(record_id)},
-            {'$set': update_data}
-        )
-
-        # Audit log
+        now = datetime.datetime.utcnow()
+        update_data.update({'updated_at': now, 'updated_by': str(request.user.id)})
+        try:
+            db[collection_name].update_one({'_id': ObjectId(record_id)}, {'$set': update_data})
+        except DuplicateKeyError as exc:
+            field_name = _extract_duplicate_field(exc, fields)
+            return Response(
+                {'errors': {field_name: f'{field_name}: this value already exists'}},
+                status=400,
+            )
         db['audit_logs'].insert_one({
-            'action': 'update_record',
-            'collection': collection_name,
-            'record_id': record_id,
-            'user_id': str(request.user.id),
-            'created_at': datetime.datetime.utcnow(),
+            'action': 'update_record', 'collection': collection_name,
+            'record_id': record_id, 'user_id': str(request.user.id), 'created_at': now,
         })
-
         return Response({'message': 'Record updated successfully'})
 
     elif request.method == 'DELETE':
         db[collection_name].delete_one({'_id': ObjectId(record_id)})
-
         db['audit_logs'].insert_one({
-            'action': 'delete_record',
-            'collection': collection_name,
-            'record_id': record_id,
-            'user_id': str(request.user.id),
+            'action': 'delete_record', 'collection': collection_name,
+            'record_id': record_id, 'user_id': str(request.user.id),
             'created_at': datetime.datetime.utcnow(),
         })
-
         return Response({'message': 'Record deleted successfully'})
 
 
+# ──────────────────────────────────────────────
+# EXPORT — GET /forms/records/<form_name>/export/
+# ──────────────────────────────────────────────
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def export_records(request, form_name):
+    db_name = get_tenant_db_name(request)
+    if not db_name:
+        return Response({'error': 'Tenant context required'}, status=400)
+
+    db = get_tenant_db(db_name)
+    form_config = db['dynamic_forms'].find_one({'form_name': form_name, 'type': 'input'})
+    if not form_config:
+        return Response({'error': 'Form not found'}, status=404)
+
+    fields          = form_config.get('fields', [])
+    field_keys      = [f['key'] for f in fields]
+    field_labels    = [f['label'] for f in fields]
+    collection_name = f"records_{form_name}"
+
+    records = list(db[collection_name].find({}).sort('created_at', -1))
+
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(field_labels)   # header row uses human labels
+
+    for r in records:
+        row = []
+        for key in field_keys:
+            val = r.get(key, '')
+            if isinstance(val, datetime.datetime):
+                val = val.isoformat()
+            row.append(val)
+        writer.writerow(row)
+
+    response = HttpResponse(output.getvalue(), content_type='text/csv')
+    response['Content-Disposition'] = f'attachment; filename="{form_name}.csv"'
+    return response
+
+
+# ──────────────────────────────────────────────
+# BULK IMPORT — POST /forms/records/<form_name>/import/
+# ──────────────────────────────────────────────
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def import_records(request, form_name):
+    db_name = get_tenant_db_name(request)
+    if not db_name:
+        return Response({'error': 'Tenant context required'}, status=400)
+
+    db = get_tenant_db(db_name)
+    form_config = db['dynamic_forms'].find_one({'form_name': form_name, 'type': 'input'})
+    if not form_config:
+        return Response({'error': 'Form not found'}, status=404)
+
+    csv_file = request.FILES.get('file')
+    if not csv_file:
+        return Response({'error': 'CSV file is required (field: file)'}, status=400)
+
+    fields      = form_config.get('fields', [])
+    label_to_key = {f['label'].lower(): f['key'] for f in fields}
+    key_to_field  = {f['key']: f for f in fields}
+
+    try:
+        content = csv_file.read().decode('utf-8-sig')
+        reader  = csv.DictReader(io.StringIO(content))
+    except Exception as e:
+        return Response({'error': f'Could not parse CSV: {e}'}, status=400)
+
+    collection_name = f"records_{form_name}"
+    inserted, row_errors = 0, []
+    now = datetime.datetime.utcnow()
+
+    for row_num, row in enumerate(reader, start=2):
+        record, errors = {}, {}
+
+        for csv_col, value in row.items():
+            # Match CSV header to field key (try exact key first, then label)
+            col_lower = csv_col.strip().lower()
+            field_key = col_lower if col_lower in key_to_field else label_to_key.get(col_lower)
+            if not field_key:
+                continue
+
+            field = key_to_field[field_key]
+            if value is None or value.strip() == '':
+                if field.get('required'):
+                    errors[field_key] = f"{field['label']} is required"
+                continue
+            try:
+                record[field_key] = _validate_field_value(value.strip(), field)
+            except ValueError as e:
+                errors[field_key] = str(e)
+
+        if errors:
+            row_errors.append({'row': row_num, 'errors': errors})
+            continue
+
+        record.update({'created_by': str(request.user.id), 'created_at': now, 'updated_at': now})
+        db[collection_name].insert_one(record)
+        inserted += 1
+
+    return Response({
+        'message':    f'{inserted} records imported successfully',
+        'inserted':   inserted,
+        'row_errors': row_errors,
+    }, status=201 if inserted > 0 else 400)
+
+
+# ──────────────────────────────────────────────
+# BULK UPDATE — PATCH /forms/records/<form_name>/bulk-update/
+# ──────────────────────────────────────────────
+
+@api_view(['PATCH'])
+@permission_classes([IsAuthenticated])
+def bulk_update_records(request, form_name):
+    db_name = get_tenant_db_name(request)
+    if not db_name:
+        return Response({'error': 'Tenant context required'}, status=400)
+
+    db = get_tenant_db(db_name)
+    form_config = db['dynamic_forms'].find_one({'form_name': form_name, 'type': 'input'})
+    if not form_config:
+        return Response({'error': 'Form not found'}, status=404)
+
+    record_ids = request.data.get('record_ids', [])
+    updates    = request.data.get('updates', {})
+
+    if not record_ids:
+        return Response({'error': 'record_ids is required'}, status=400)
+    if not updates:
+        return Response({'error': 'updates is required'}, status=400)
+
+    fields        = form_config.get('fields', [])
+    key_to_field  = {f['key']: f for f in fields}
+    validated, errors = {}, {}
+
+    for key, value in updates.items():
+        if key not in key_to_field:
+            continue
+        try:
+            validated[key] = _validate_field_value(value, key_to_field[key])
+        except ValueError as e:
+            errors[key] = str(e)
+
+    if errors:
+        return Response({'errors': errors}, status=400)
+
+    now = datetime.datetime.utcnow()
+    validated.update({'updated_at': now, 'updated_by': str(request.user.id)})
+
+    object_ids = []
+    for rid in record_ids:
+        try:
+            object_ids.append(ObjectId(rid))
+        except Exception:
+            pass
+
+    result = db[f"records_{form_name}"].update_many(
+        {'_id': {'$in': object_ids}},
+        {'$set': validated}
+    )
+
+    return Response({
+        'message':  f'{result.modified_count} records updated',
+        'modified': result.modified_count,
+    })
+
+
+# ──────────────────────────────────────────────
+# BULK DELETE — DELETE /forms/records/<form_name>/bulk-delete/
+# ──────────────────────────────────────────────
+
+@api_view(['DELETE'])
+@permission_classes([IsAuthenticated])
+def bulk_delete_records(request, form_name):
+    db_name = get_tenant_db_name(request)
+    if not db_name:
+        return Response({'error': 'Tenant context required'}, status=400)
+
+    db = get_tenant_db(db_name)
+    record_ids = request.data.get('record_ids', [])
+    if not record_ids:
+        return Response({'error': 'record_ids is required'}, status=400)
+
+    object_ids = []
+    for rid in record_ids:
+        try:
+            object_ids.append(ObjectId(rid))
+        except Exception:
+            pass
+
+    result = db[f"records_{form_name}"].delete_many({'_id': {'$in': object_ids}})
+    return Response({'message': f'{result.deleted_count} records deleted', 'deleted': result.deleted_count})
+
+
+# ──────────────────────────────────────────────
+# LIST PAGE DATA
+# ──────────────────────────────────────────────
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def list_page_data(request, page_name):
+    db_name = get_tenant_db_name(request)
+    if not db_name:
+        return Response({'error': 'Tenant context required'}, status=400)
+
+    db = get_tenant_db(db_name)
+    page_config = db['dynamic_forms'].find_one({'form_name': page_name, 'type': 'list'})
+    if not page_config:
+        return Response({'error': 'List page not found'}, status=404)
+
+    form_ref        = page_config.get('form_ref')
+    collection_name = f"records_{form_ref}"
+    columns         = page_config.get('columns', [])
+
+    page      = int(request.GET.get('page', 1))
+    page_size = int(request.GET.get('page_size', page_config.get('pagination', {}).get('page_size', 20)))
+    search    = request.GET.get('search', '')
+    sort_by   = request.GET.get('sort_by', 'created_at')
+    sort_order = -1 if request.GET.get('sort_order', 'desc') == 'desc' else 1
+
+    # Load source form ONCE — used for search, filters, and footer
+    source_form_doc  = db['dynamic_forms'].find_one({'form_name': form_ref, 'type': 'input'}) or {}
+    source_fields    = source_form_doc.get('fields', [])
+    source_field_map = {f['key']: f for f in source_fields}
+
+    # Derive footer dynamically from fields that have show_footer_sum enabled
+    footer = {
+        f['key']: 'sum'
+        for f in source_fields
+        if f.get('show_footer_sum') and f.get('type') in ('number', 'currency')
+    }
+
+    # Build query
+    query = {}
+
+    if search:
+        searchable = [f['key'] for f in source_fields if f.get('is_searchable')]
+        if searchable:
+            query['$or'] = [{field: {'$regex': search, '$options': 'i'}} for field in searchable]
+
+    # Per-column filters from query params
+    for col in columns:
+        field_meta = source_field_map.get(col, {})
+        ftype      = field_meta.get('type', 'text')
+
+        val = request.GET.get(f'filter_{col}')
+        if val:
+            if ftype in ('number', 'currency', 'percentage'):
+                try:
+                    query[col] = float(val)
+                except ValueError:
+                    pass
+            elif ftype in ('checkbox', 'switch', 'boolean'):
+                query[col] = val.lower() in ('true', '1', 'yes')
+            elif ftype in ('select', 'radio', 'date', 'datetime', 'time'):
+                query[col] = val
+            else:
+                query[col] = {'$regex': val, '$options': 'i'}
+
+        # Date / datetime / time range filters
+        if ftype in ('date', 'datetime', 'time'):
+            gte = request.GET.get(f'filter_{col}_gte')
+            lte = request.GET.get(f'filter_{col}_lte')
+            if gte or lte:
+                query[col] = {}
+                if gte:
+                    query[col]['$gte'] = gte
+                if lte:
+                    query[col]['$lte'] = lte
+
+    total   = db[collection_name].count_documents(query)
+    records = list(db[collection_name].find(query)
+                   .sort(sort_by, sort_order)
+                   .skip((page - 1) * page_size)
+                   .limit(page_size))
+    for r in records:
+        r['_id'] = str(r['_id'])
+        for k, v in r.items():
+            if isinstance(v, datetime.datetime):
+                r[k] = v.isoformat()
+
+    # Footer aggregations (same filtered query scope)
+    footer_values = {}
+    if footer:
+        pipeline = []
+        if query:
+            pipeline.append({'$match': query})
+        pipeline.append({'$group': {
+            '_id': None,
+            **{f'{col}_sum': {'$sum': f'${col}'}
+               for col in footer}
+        }})
+        agg_result = list(db[collection_name].aggregate(pipeline))
+        if agg_result:
+            for col in footer:
+                footer_values[col] = agg_result[0].get(f'{col}_sum', 0)
+                footer_values[f'{col}_aggregation'] = 'sum'
+
+    return Response({
+        'page_config': {
+            '_id':          str(page_config['_id']),
+            'form_name':    page_config['form_name'],
+            'display_name': page_config.get('display_name'),
+            'form_ref':     form_ref,
+            'columns':      columns,
+            'actions':      page_config.get('actions', []),
+            'footer':       footer,
+            'filters':      page_config.get('filters', []),
+            'source_fields': source_fields,
+        },
+        'results':      records,
+        'total':        total,
+        'page':         page,
+        'page_size':    page_size,
+        'footer_values': footer_values,
+    })
+
+
+# ──────────────────────────────────────────────
+# REPORT CONFIGURATION  (join-based views)
+# ──────────────────────────────────────────────
+
+@api_view(['GET', 'POST'])
+@permission_classes([IsAuthenticated])
+def report_configs(request):
+    db_name = get_tenant_db_name(request)
+    if not db_name:
+        return Response({'error': 'Tenant context required'}, status=400)
+
+    db = get_tenant_db(db_name)
+
+    if request.method == 'GET':
+        reports = list(db['dynamic_forms'].find({'type': 'report'}).sort('created_at', -1))
+        for r in reports:
+            r['_id'] = str(r['_id'])
+            if isinstance(r.get('created_at'), datetime.datetime):
+                r['created_at'] = r['created_at'].isoformat()
+        return Response({'results': reports, 'total': len(reports)})
+
+    data      = request.data
+    form_name = data.get('form_name', '').strip().lower().replace(' ', '_')
+    if not form_name:
+        return Response({'error': 'form_name is required'}, status=400)
+    if db['dynamic_forms'].find_one({'form_name': form_name}):
+        return Response({'error': f'"{form_name}" already exists'}, status=409)
+
+    now = datetime.datetime.utcnow()
+    report = {
+        'form_name':       form_name,
+        'display_name':    data.get('display_name', form_name.replace('_', ' ').title()),
+        'category':        data.get('category', ''),
+        'type':            'report',
+        'base_collection': data.get('base_collection', ''),
+        'joins':           data.get('joins', []),
+        'columns':         data.get('columns', []),
+        'created_by':      str(request.user.id),
+        'created_at':      now,
+        'updated_at':      now,
+        'is_active':       True,
+    }
+    result = db['dynamic_forms'].insert_one(report)
+    report['_id'] = str(result.inserted_id)
+    return Response({'message': f'Report "{form_name}" created', 'report': report}, status=201)
+
+
+@api_view(['GET', 'PUT', 'DELETE'])
+@permission_classes([IsAuthenticated])
+def report_config_detail(request, report_name):
+    db_name = get_tenant_db_name(request)
+    if not db_name:
+        return Response({'error': 'Tenant context required'}, status=400)
+
+    db = get_tenant_db(db_name)
+    report = db['dynamic_forms'].find_one({'form_name': report_name, 'type': 'report'})
+    if not report:
+        return Response({'error': 'Report not found'}, status=404)
+
+    if request.method == 'GET':
+        report['_id'] = str(report['_id'])
+        if isinstance(report.get('created_at'), datetime.datetime):
+            report['created_at'] = report['created_at'].isoformat()
+        return Response(report)
+
+    if request.method == 'PUT':
+        data   = request.data
+        update = {'updated_at': datetime.datetime.utcnow()}
+        for field in ('display_name', 'category', 'base_collection', 'joins', 'columns'):
+            if field in data:
+                update[field] = data[field]
+        db['dynamic_forms'].update_one({'form_name': report_name}, {'$set': update})
+        return Response({'message': f'Report "{report_name}" updated'})
+
+    db['dynamic_forms'].delete_one({'form_name': report_name})
+    return Response({'message': f'Report "{report_name}" deleted'})
+
+
+def _serialize_doc(doc: dict):
+    """Recursively convert ObjectId / datetime inside a Mongo document."""
+    for k, v in list(doc.items()):
+        if isinstance(v, datetime.datetime):
+            doc[k] = v.isoformat()
+        elif isinstance(v, ObjectId):
+            doc[k] = str(v)
+        elif isinstance(v, dict):
+            _serialize_doc(v)
+        elif isinstance(v, list):
+            for item in v:
+                if isinstance(item, dict):
+                    _serialize_doc(item)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def report_data(request, report_name):
+    db_name = get_tenant_db_name(request)
+    if not db_name:
+        return Response({'error': 'Tenant context required'}, status=400)
+
+    db     = get_tenant_db(db_name)
+    config = db['dynamic_forms'].find_one({'form_name': report_name, 'type': 'report'})
+    if not config:
+        return Response({'error': 'Report not found'}, status=404)
+
+    base_col  = f"records_{config['base_collection']}"
+    joins     = config.get('joins', [])
+    columns   = config.get('columns', [])
+    page      = int(request.GET.get('page', 1))
+    page_size = int(request.GET.get('page_size', 20))
+    search    = request.GET.get('search', '')
+    sort_by   = request.GET.get('sort_by', 'created_at')
+    sort_order = -1 if request.GET.get('sort_order', 'desc') == 'desc' else 1
+
+    # ── Build the $lookup pipeline ────────────────────────────
+    base_pipeline = []
+    for join in joins:
+        join_col      = f"records_{join['collection']}"
+        local_field   = join['local_field']
+        foreign_field = join.get('foreign_field', '_id')
+        alias         = join['as']
+
+        if foreign_field == '_id':
+            # Coerce both sides to string so the match works whether the local
+            # field stores a plain string, an ObjectId, or a numeric id.
+            # Guard against null local_field to avoid matching empty strings.
+            base_pipeline.append({
+                '$lookup': {
+                    'from': join_col,
+                    'let':  {'lval': {'$toString': f'${local_field}'}},
+                    'pipeline': [
+                        {'$addFields': {'__sid': {'$toString': '$_id'}}},
+                        {'$match': {'$expr': {
+                            '$and': [
+                                {'$ne': ['$$lval', '']},
+                                {'$eq': ['$$lval', '$__sid']},
+                            ]
+                        }}},
+                    ],
+                    'as': alias,
+                }
+            })
+        else:
+            # For non-_id foreign fields, also coerce both sides to string
+            base_pipeline.append({
+                '$lookup': {
+                    'from': join_col,
+                    'let':  {'lval': {'$toString': f'${local_field}'}},
+                    'pipeline': [
+                        {'$addFields': {'__fval': {'$toString': f'${foreign_field}'}}},
+                        {'$match': {'$expr': {
+                            '$and': [
+                                {'$ne': ['$$lval', '']},
+                                {'$eq': ['$$lval', '$__fval']},
+                            ]
+                        }}},
+                    ],
+                    'as': alias,
+                }
+            })
+        # Left-join: keep base records even when join has no match
+        base_pipeline.append({
+            '$unwind': {'path': f'${alias}', 'preserveNullAndEmptyArrays': True}
+        })
+
+    # ── Search (across text fields on the base collection) ────
+    if search:
+        base_form = db['dynamic_forms'].find_one(
+            {'form_name': config['base_collection'], 'type': 'input'}
+        )
+        text_fields = [
+            f['key'] for f in (base_form or {}).get('fields', [])
+            if f['type'] in ('text', 'textarea', 'email', 'phone', 'url')
+        ]
+        if text_fields:
+            base_pipeline.append({'$match': {'$or': [
+                {fk: {'$regex': search, '$options': 'i'}} for fk in text_fields
+            ]}})
+
+    # ── Count total before pagination ──────────────────────────
+    count_result = list(db[base_col].aggregate(base_pipeline + [{'$count': 'n'}]))
+    total = count_result[0]['n'] if count_result else 0
+
+    # ── Data with sort + pagination ────────────────────────────
+    records = list(db[base_col].aggregate(
+        base_pipeline + [
+            {'$sort': {sort_by: sort_order}},
+            {'$skip': (page - 1) * page_size},
+            {'$limit': page_size},
+        ]
+    ))
+    for r in records:
+        _serialize_doc(r)
+
+    col_keys = {col['key'] for col in columns}
+
+    # Build per-field resolution maps for base and joined collections
+    # option_maps: {col_key → {str(value): label}}   for select/radio/etc.
+    # tvk_maps:    {col_key → storage_key}            for api_select/dependent_select
+    option_maps = {}
+    tvk_maps = {}
+
+    def _collect_field_maps(fields_cfg, prefix=''):
+        for field in fields_cfg:
+            ftype = field.get('type', '')
+            fkey  = field['key']
+            col_key = f"{prefix}.{fkey}" if prefix else fkey
+            if col_key not in col_keys:
+                continue
+            if ftype in ('select', 'radio', 'checkbox', 'multi_select') and field.get('options'):
+                option_maps[col_key] = {
+                    str(opt.get('value', '')): opt.get('label', str(opt.get('value', '')))
+                    for opt in field['options']
+                }
+            elif ftype in ('api_select', 'dependent_select'):
+                tvk = field.get('table_value_key', '')
+                if tvk:
+                    # Display label is stored under "{fkey}_{tvk}" on the record
+                    tvk_maps[col_key] = f"{fkey}_{tvk}"
+
+    base_form_cfg = db['dynamic_forms'].find_one({'form_name': config['base_collection'], 'type': 'input'})
+    if base_form_cfg:
+        _collect_field_maps(base_form_cfg.get('fields', []))
+
+    for join in joins:
+        join_form_cfg = db['dynamic_forms'].find_one({'form_name': join['collection'], 'type': 'input'})
+        if join_form_cfg:
+            _collect_field_maps(join_form_cfg.get('fields', []), prefix=join['as'])
+
+    def _set_nested(record, col_key, value):
+        if '.' in col_key:
+            prefix, sub = col_key.split('.', 1)
+            nested = record.get(prefix)
+            if isinstance(nested, dict):
+                nested[sub] = value
+        else:
+            record[col_key] = value
+
+    def _get_nested(record, col_key):
+        if '.' in col_key:
+            prefix, sub = col_key.split('.', 1)
+            nested = record.get(prefix)
+            return nested.get(sub) if isinstance(nested, dict) else None
+        return record.get(col_key)
+
+    # Join aliases: after $lookup these keys hold nested dicts — never overwrite them
+    join_aliases = {j['as'] for j in joins}
+
+    for r in records:
+        # Resolve select option values → labels
+        for col_key, opt_map in option_maps.items():
+            if col_key in join_aliases:
+                continue
+            raw = _get_nested(r, col_key)
+            if raw is not None:
+                resolved = [opt_map.get(str(v), v) for v in raw] if isinstance(raw, list) \
+                           else opt_map.get(str(raw), raw)
+                _set_nested(r, col_key, resolved)
+
+        # Resolve api_select/dependent_select: replace UID with stored display label
+        for col_key, storage_key in tvk_maps.items():
+            if '.' in col_key:
+                # Join field: label stored inside the nested joined document
+                join_alias = col_key.split('.', 1)[0]
+                nested = r.get(join_alias)
+                if isinstance(nested, dict):
+                    label = nested.get(storage_key)
+                    if label is not None:
+                        _set_nested(r, col_key, label)
+            else:
+                # Base field: skip if this key is a join alias (it holds a joined doc)
+                if col_key in join_aliases:
+                    continue
+                label = r.get(storage_key)
+                if label is not None:
+                    _set_nested(r, col_key, label)
+
+    return Response({
+        'config': {
+            '_id':          str(config['_id']),
+            'form_name':    config['form_name'],
+            'display_name': config.get('display_name', ''),
+            'columns':      columns,
+        },
+        'results':   records,
+        'total':     total,
+        'page':      page,
+        'page_size': page_size,
+    })
+
+
 def _validate_field_value(value, field: dict):
-    """Validate and coerce a field value based on its type."""
     field_type = field['type']
     validation = field.get('validation', {})
 
-    if field_type == 'number' or field_type == 'currency' or field_type == 'percentage':
+    if field_type in ('number', 'currency', 'percentage'):
         try:
             value = float(value)
         except (ValueError, TypeError):
-            raise ValueError(f"Must be a number")
+            raise ValueError("Must be a number")
         if validation.get('min') is not None and value < float(validation['min']):
             raise ValueError(f"Must be at least {validation['min']}")
         if validation.get('max') is not None and value > float(validation['max']):
             raise ValueError(f"Must be at most {validation['max']}")
 
-    elif field_type == 'text' or field_type == 'textarea':
+    elif field_type in ('text', 'textarea'):
         value = str(value)
         if validation.get('min_length') and len(value) < int(validation['min_length']):
             raise ValueError(f"Must be at least {validation['min_length']} characters")
@@ -512,110 +1283,18 @@ def _validate_field_value(value, field: dict):
         if not re.match(r'^[^@]+@[^@]+\.[^@]+$', str(value)):
             raise ValueError("Invalid email address")
 
-    elif field_type == 'select' or field_type == 'radio':
+    elif field_type in ('select', 'radio'):
         options = [opt.get('value', opt) for opt in field.get('options', [])]
         if options and value not in options:
-            raise ValueError(f"Invalid selection. Choose from: {options}")
+            raise ValueError(f"Invalid selection")
 
-    elif field_type == 'checkbox' or field_type == 'switch':
+    elif field_type in ('checkbox', 'switch'):
         value = bool(value)
 
+    elif field_type == 'sub_form':
+        # Sub-form value is an array of row objects — return as-is
+        if isinstance(value, list):
+            return value
+        return []
+
     return value
-
-
-@api_view(['GET'])
-@permission_classes([IsAuthenticated])
-def form_config_detail(request, form_name):
-    """Get a specific form configuration (for rendering)."""
-    db_name = get_tenant_db_name(request)
-    if not db_name:
-        return Response({'error': 'Tenant context required'}, status=400)
-
-    db = get_tenant_db(db_name)
-    form = db['dynamic_forms'].find_one({'form_name': form_name})
-
-    if not form:
-        return Response({'error': 'Form not found'}, status=404)
-
-    form['_id'] = str(form['_id'])
-    return Response(form)
-
-
-@api_view(['GET'])
-@permission_classes([IsAuthenticated])
-def list_page_data(request, page_name):
-    """
-    Fetch data for a list page with footer aggregations.
-    """
-    db_name = get_tenant_db_name(request)
-    if not db_name:
-        return Response({'error': 'Tenant context required'}, status=400)
-
-    db = get_tenant_db(db_name)
-    page_config = db['dynamic_forms'].find_one({'form_name': page_name, 'type': 'list'})
-
-    if not page_config:
-        return Response({'error': 'List page not found'}, status=404)
-
-    form_ref = page_config.get('form_ref')
-    collection_name = f"records_{form_ref}"
-    columns = page_config.get('columns', [])
-    footer = page_config.get('footer', {})
-    pagination = page_config.get('pagination', {})
-
-    page = int(request.GET.get('page', 1))
-    page_size = int(request.GET.get('page_size', pagination.get('page_size', 20)))
-
-    # Build projection to only fetch needed columns
-    projection = {col: 1 for col in columns}
-    projection['_id'] = 1
-    projection['created_at'] = 1
-
-    records = list(
-        db[collection_name].find({}, projection)
-        .sort('created_at', -1)
-        .skip((page - 1) * page_size)
-        .limit(page_size)
-    )
-
-    for r in records:
-        r['_id'] = str(r['_id'])
-
-    total = db[collection_name].count_documents({})
-
-    # Compute footer aggregations
-    footer_values = {}
-    if footer:
-        pipeline = [
-            {'$group': {
-                '_id': None,
-                **{
-                    f'{col}_{agg}': {
-                        f'${agg}': f'${col}'
-                    }
-                    for col, agg in footer.items()
-                    if agg in ('sum', 'avg', 'min', 'max')
-                }
-            }}
-        ]
-        agg_result = list(db[collection_name].aggregate(pipeline))
-        if agg_result:
-            for col, agg in footer.items():
-                footer_values[col] = agg_result[0].get(f'{col}_{agg}', 0)
-                footer_values[f'{col}_aggregation'] = agg
-
-    return Response({
-        'page_config': {
-            '_id': str(page_config['_id']),
-            'form_name': page_config['form_name'],
-            'display_name': page_config.get('display_name'),
-            'columns': columns,
-            'actions': page_config.get('actions', []),
-            'footer': footer,
-        },
-        'results': records,
-        'total': total,
-        'page': page,
-        'page_size': page_size,
-        'footer_values': footer_values,
-    })

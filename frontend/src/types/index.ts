@@ -38,10 +38,11 @@ export interface Company {
 // ── Field Types ──────────────────────────────────────────────
 
 export type FieldType =
-  | 'text' | 'number' | 'email' | 'phone' | 'date' | 'datetime'
+  | 'text' | 'number' | 'email' | 'phone' | 'date' | 'datetime' | 'time'
   | 'select' | 'multi_select' | 'checkbox' | 'radio' | 'textarea'
   | 'file' | 'image' | 'currency' | 'percentage' | 'url' | 'color'
-  | 'rating' | 'switch' | 'hidden' | 'formula' | 'relation';
+  | 'rating' | 'switch' | 'hidden' | 'formula' | 'relation'
+  | 'api_select' | 'dependent_select' | 'uid' | 'sub_form';
 
 export interface FieldOption {
   label: string;
@@ -71,7 +72,52 @@ export interface FormField {
   help_text?: string;
   is_searchable?: boolean;
   is_sortable?: boolean;
+  show_footer_sum?: boolean;
   hidden?: boolean;
+  // API-driven select fields
+  api_url?: string;
+  api_method?: 'GET' | 'POST';
+  response_path?: string;       // dot-notation path to the array, e.g. "data" or "result.items"
+  display_key?: string;         // object key to use as label, e.g. "name"
+  value_key?: string;           // object key to use as value, e.g. "id"
+  // Auth
+  api_auth_type?: 'none' | 'basic' | 'bearer';
+  api_auth_token?: string;      // Bearer token value
+  api_auth_username?: string;   // Basic auth username
+  api_auth_password?: string;   // Basic auth password
+  // POST body
+  api_body?: string;            // Raw JSON body string
+  // Dependent select
+  depends_on?: string;          // key of the parent field
+  filter_key?: string;          // query-param name to pass parent value, e.g. "country_id"
+  // Searchable combobox (api_select / dependent_select)
+  searchable_dropdown?: boolean;
+  // Data source for api_select / dependent_select
+  api_source?: 'url' | 'form';   // default 'url'
+  source_form?: string;           // input form name when api_source === 'form'
+  // Number / currency / text value source
+  value_source?: 'manual' | 'api' | 'formula' | 'combined' | 'field_lookup';
+  formula?: string;             // e.g. "price * quantity" using other field keys
+  // API select — label stored alongside the value for list display
+  table_value_key?: string;
+  // Date / datetime / time — display format, timezone and default
+  date_format?: string;        // e.g. 'DD/MM/YYYY'
+  time_format?: '24h' | '12h';
+  field_timezone?: string;     // IANA timezone override, e.g. 'Asia/Kolkata'
+  default_now?: boolean;
+  // Uniqueness constraint
+  is_unique?: boolean;
+  // Inline editing in list view
+  edit_on_list?: boolean;
+  // Combined text field (value auto-built from other fields + sequential number)
+  combined_template?: string;  // e.g. "{{category}}-{{supplier_code}}-{{auto_generate}}"
+  // Sub-form field (multi-row table inline)
+  sub_form_fields?: FormField[];
+  // Sum all rows of this sub-form column into a main-form field
+  sum_to_main?: boolean;
+  // Field lookup — auto-populate from a form-source dropdown
+  lookup_field_key?: string;
+  lookup_source_field?: string;
 }
 
 // ── Form Configuration ──────────────────────────────────────
@@ -80,6 +126,7 @@ export interface InputFormConfig {
   _id: string;
   form_name: string;
   display_name: string;
+  category?: string;
   type: 'input';
   fields: FormField[];
   settings: {
@@ -165,6 +212,34 @@ export interface PaymentIntent {
   amount: number;
   currency: string;
   status: string;
+}
+
+// ── Report (Join) Types ──────────────────────────────────────
+
+export interface ReportJoin {
+  collection: string;    // input form name (e.g. "branch")
+  local_field: string;   // field in base collection (e.g. "branch_id")
+  foreign_field: string; // field in joined collection (usually "_id")
+  as: string;            // alias used in result (e.g. "branch")
+}
+
+export interface ReportColumn {
+  key: string;    // dot-notation key: "field" or "alias.field"
+  label: string;  // display label
+  source: string; // "base" | join alias
+}
+
+export interface ReportConfig {
+  _id: string;
+  form_name: string;
+  display_name: string;
+  category?: string;
+  type: 'report';
+  base_collection: string;
+  joins: ReportJoin[];
+  columns: ReportColumn[];
+  created_at: string;
+  is_active: boolean;
 }
 
 // ── Store Types (Zustand) ────────────────────────────────────
