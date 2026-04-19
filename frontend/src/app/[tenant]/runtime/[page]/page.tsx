@@ -30,6 +30,8 @@ export default function RuntimePage() {
 
   const [panelOpen, setPanelOpen]       = useState(false);
   const [editRecord, setEditRecord]     = useState<Record<string, unknown> | null>(null);
+  const [panelMode, setPanelMode]       = useState<'create' | 'edit' | 'edit_with_new'>('create');
+  const [editWithNewData, setEditWithNewData] = useState<Record<string, unknown> | null>(null);
 
   // Fetch the input form config for the create/edit form
   const { data: formConfig, isLoading: loadingForm } = useQuery({
@@ -40,17 +42,48 @@ export default function RuntimePage() {
 
   const openCreate = () => {
     setEditRecord(null);
+    setEditWithNewData(null);
+    setPanelMode('create');
     setPanelOpen(true);
   };
 
   const openEdit = (record: Record<string, unknown>) => {
     setEditRecord(record);
+    setEditWithNewData(null);
+    setPanelMode('edit');
+    setPanelOpen(true);
+  };
+
+  const openEditWithNew = (record: Record<string, unknown>) => {
+    const ewField = formConfig?.fields.find(f => f.type === 'edit_with_new');
+    if (!ewField) return;
+
+    // Keys that must NOT be copied: _id and any uid auto-generated fields
+    const uidKeys = new Set(
+      (formConfig?.fields ?? []).filter(f => f.type === 'uid').map(f => f.key)
+    );
+
+    // Start with all values from the old record, minus _id and uid fields
+    const preData: Record<string, unknown> = {};
+    for (const [key, val] of Object.entries(record)) {
+      if (key === '_id' || uidKeys.has(key)) continue;
+      preData[key] = val;
+    }
+
+    // Set the edit_with_new reference value
+    preData[ewField.key] = ewField.reference_key ? record[ewField.reference_key] : undefined;
+
+    setEditRecord(null);
+    setEditWithNewData(preData);
+    setPanelMode('edit_with_new');
     setPanelOpen(true);
   };
 
   const closePanel = () => {
     setPanelOpen(false);
     setEditRecord(null);
+    setEditWithNewData(null);
+    setPanelMode('create');
   };
 
   return (
@@ -86,6 +119,7 @@ export default function RuntimePage() {
             <DynamicList
               pageName={pageName}
               onEditRecord={openEdit}
+              onEditWithNew={openEditWithNew}
               activeRecordId={editRecord ? String(editRecord._id) : null}
             />
           </div>
@@ -96,7 +130,7 @@ export default function RuntimePage() {
               {/* Panel header */}
               <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100">
                 <h3 className="font-semibold text-gray-900">
-                  {editRecord ? 'Edit Record' : 'New Record'}
+                  {panelMode === 'edit' ? 'Edit Record' : panelMode === 'edit_with_new' ? 'Edit With New' : 'New Record'}
                 </h3>
                 <button
                   onClick={closePanel}
@@ -110,9 +144,9 @@ export default function RuntimePage() {
               <div className="p-5">
                 <DynamicForm
                   config={formConfig}
-                  mode={editRecord ? 'edit' : 'create'}
-                  recordId={editRecord ? String(editRecord._id) : undefined}
-                  initialData={editRecord ?? {}}
+                  mode={panelMode}
+                  recordId={panelMode === 'edit' && editRecord ? String(editRecord._id) : undefined}
+                  initialData={panelMode === 'edit' ? (editRecord ?? {}) : panelMode === 'edit_with_new' ? (editWithNewData ?? {}) : {}}
                   onSuccess={() => closePanel()}
                 />
               </div>

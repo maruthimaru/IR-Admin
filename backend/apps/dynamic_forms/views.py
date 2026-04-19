@@ -24,7 +24,7 @@ ALLOWED_FIELD_TYPES = [
     'select', 'multi_select', 'checkbox', 'radio', 'textarea',
     'file', 'image', 'currency', 'percentage', 'url', 'color',
     'rating', 'switch', 'hidden', 'formula', 'relation',
-    'api_select', 'dependent_select', 'uid', 'sub_form',
+    'api_select', 'dependent_select', 'uid', 'sub_form', 'edit_with_new',
 ]
 
 
@@ -351,6 +351,23 @@ def _validate_fields(fields: list):
             # Field lookup (auto-populate text field from a form-source dropdown)
             'lookup_field_key':    field.get('lookup_field_key', ''),
             'lookup_source_field': field.get('lookup_source_field', ''),
+            # Sum sub-form column into parent field
+            'sum_to_main':         field.get('sum_to_main', False),
+            # Conditional formula (value_source = 'conditional')
+            'condition_field':             field.get('condition_field', ''),
+            'conditions':                  field.get('conditions', []),
+            'condition_default_formula':   field.get('condition_default_formula', ''),
+            # Sub-form record update on save (multiple targets)
+            'update_enabled':  field.get('update_enabled', False),
+            'update_targets':  field.get('update_targets', []),
+            # Edit-with-new field config
+            'reference_key':   field.get('reference_key', ''),
+            'update_on_save':  field.get('update_on_save', False),
+            'ewn_update_rules': field.get('ewn_update_rules', []),
+            # Currency display symbol
+            'currency_symbol': field.get('currency_symbol', ''),
+            # Extra filter params for api_select / dependent_select
+            'api_filters': field.get('api_filters', []),
         })
     return validated
 
@@ -462,6 +479,310 @@ def _process_subform_rows(db, collection_name: str, sub_form_key: str, rows, sub
     return processed
 
 
+def _apply_subform_updates(db, record_data: dict, fields: list):
+    """
+    After saving a record, check each sub_form field for update_enabled.
+    Iterates over update_targets — each target has its own target_form,
+    lookup_key, and rules. Applies field updates (set/increment/decrement/multiply).
+    """
+    for field in fields:
+        if field.get('type') != 'sub_form':
+            continue
+        if not field.get('update_enabled'):
+            continue
+
+        rows = record_data.get(field['key'], [])
+        if not isinstance(rows, list):
+            continue
+
+        for target in field.get('update_targets', []):
+            target_form = (target.get('target_form') or '').strip()
+            lookup_key  = (target.get('lookup_key') or '').strip()
+            rules       = target.get('rules', [])
+
+            if not target_form or not lookup_key or not rules:
+                continue
+
+            target_collection = f'records_{target_form}'
+
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+
+                lookup_value = row.get(lookup_key)
+                if lookup_value is None:
+                    continue
+
+                # Build MongoDB query — try ObjectId, then int coercion, then plain string
+                query = None
+                try:
+                    query = {'_id': ObjectId(str(lookup_value))}
+                except Exception:
+                    # Try numeric coercion (uid fields are stored as int)
+                    try:
+                        query = {lookup_key: int(lookup_value)}
+                    except (ValueError, TypeError):
+                        query = {lookup_key: lookup_value}
+
+                # Build MongoDB update operators
+                set_ops  = {}
+                inc_ops  = {}
+                mul_ops  = {}
+
+                for rule in rules:
+                    to_key     = rule.get('to_key', '')
+                    operation  = rule.get('operation', 'set')
+                    value_type = rule.get('value_type', 'field')
+
+                    if not to_key:
+                        continue
+
+                    # ── Resolve the value to write ────────────────────
+                    raw_value = None
+
+                    if value_type == 'static':
+                        # Use sentinel None to skip rules with no static_value configured
+                        sv = rule.get('static_value')
+                        if sv is None:
+                            continue
+                        raw_value = sv
+
+                    elif value_type == 'conditional':
+                        cond_field = rule.get('condition_field', '')
+                        if not cond_field:
+                            continue
+                        cond_value = str(row.get(cond_field, '')).strip().lower()
+                        # Case-insensitive match against condition map
+                        matched = next(
+                            (c.get('value') for c in (rule.get('condition_map') or [])
+                             if str(c.get('when', '')).strip().lower() == cond_value),
+                            rule.get('default_value', None)
+                        )
+                        raw_value = matched
+
+                    else:  # 'field' (default)
+                        from_key = rule.get('from_key', '')
+                        if not from_key:
+                            continue
+                        raw_value = row.get(from_key)
+
+                    if raw_value is None:
+                        continue
+
+                    # ── Apply operation ───────────────────────────────
+                    if operation == 'set':
+                        set_ops[to_key] = raw_value
+                    elif operation == 'increment':
+                        try:
+                            inc_ops[to_key] = float(raw_value)
+                        except (ValueError, TypeError):
+                            pass
+                    elif operation == 'decrement':
+                        try:
+                            inc_ops[to_key] = -float(raw_value)
+                        except (ValueError, TypeError):
+                            pass
+                    elif operation == 'multiply':
+                        try:
+                            mul_ops[to_key] = float(raw_value)
+                        except (ValueError, TypeError):
+                            pass
+
+                update_doc = {}
+                if set_ops:
+                    update_doc['$set'] = set_ops
+                if inc_ops:
+                    update_doc['$inc'] = inc_ops
+                if mul_ops:
+                    update_doc['$mul'] = mul_ops
+
+                if update_doc:
+                    try:
+                        db[target_collection].update_one(query, update_doc)
+                    except Exception as e:
+                        import logging
+                        logging.getLogger(__name__).warning(
+                            f"Sub-form update failed for {target_collection} lookup={lookup_value}: {e}"
+                        )
+
+
+def _apply_subform_delete_updates(db, old_record: dict, new_record_data: dict, fields: list):
+    """
+    Detect sub-form rows that were deleted in an update and apply delete_rules
+    to their referenced records.
+    """
+    for field in fields:
+        if field.get('type') != 'sub_form':
+            continue
+        if not field.get('update_enabled'):
+            continue
+
+        field_key = field['key']
+        # Only process sub-form fields that were actually sent in the update
+        if field_key not in new_record_data:
+            continue
+
+        old_rows = old_record.get(field_key, [])
+        new_rows = new_record_data.get(field_key, [])
+        if not isinstance(old_rows, list):
+            old_rows = []
+        if not isinstance(new_rows, list):
+            new_rows = []
+
+        for target in field.get('update_targets', []):
+            target_form  = (target.get('target_form') or '').strip()
+            lookup_key   = (target.get('lookup_key') or '').strip()
+            delete_rules = target.get('delete_rules') or []
+
+            if not target_form or not lookup_key or not delete_rules:
+                continue
+
+            target_collection = f'records_{target_form}'
+
+            # Build set of lookup values that still exist in new rows
+            new_lookup_values = set()
+            for row in new_rows:
+                if isinstance(row, dict):
+                    v = row.get(lookup_key)
+                    if v is not None:
+                        new_lookup_values.add(str(v))
+
+            # Apply delete_rules for each row missing from the new list
+            for row in old_rows:
+                if not isinstance(row, dict):
+                    continue
+                lookup_value = row.get(lookup_key)
+                if lookup_value is None:
+                    continue
+                if str(lookup_value) in new_lookup_values:
+                    continue
+
+                # Build MongoDB query — try ObjectId, then int coercion, then plain string
+                query = None
+                try:
+                    query = {'_id': ObjectId(str(lookup_value))}
+                except Exception:
+                    try:
+                        query = {lookup_key: int(lookup_value)}
+                    except (ValueError, TypeError):
+                        query = {lookup_key: lookup_value}
+
+                set_ops, inc_ops, mul_ops = {}, {}, {}
+
+                for rule in delete_rules:
+                    to_key     = rule.get('to_key', '')
+                    operation  = rule.get('operation', 'set')
+                    value_type = rule.get('value_type', 'static')
+
+                    if not to_key:
+                        continue
+
+                    raw_value = None
+                    if value_type == 'static':
+                        sv = rule.get('static_value')
+                        if sv is None:
+                            continue
+                        raw_value = sv
+                    elif value_type == 'conditional':
+                        cond_field = rule.get('condition_field', '')
+                        if not cond_field:
+                            continue
+                        cond_value = str(row.get(cond_field, '')).strip().lower()
+                        matched = next(
+                            (c.get('value') for c in (rule.get('condition_map') or [])
+                             if str(c.get('when', '')).strip().lower() == cond_value),
+                            rule.get('default_value', None)
+                        )
+                        raw_value = matched
+                    else:  # 'field'
+                        from_key = rule.get('from_key', '')
+                        if not from_key:
+                            continue
+                        raw_value = row.get(from_key)
+
+                    if raw_value is None:
+                        continue
+
+                    if operation == 'set':
+                        set_ops[to_key] = raw_value
+                    elif operation == 'increment':
+                        try:
+                            inc_ops[to_key] = float(raw_value)
+                        except (ValueError, TypeError):
+                            pass
+                    elif operation == 'decrement':
+                        try:
+                            inc_ops[to_key] = -float(raw_value)
+                        except (ValueError, TypeError):
+                            pass
+                    elif operation == 'multiply':
+                        try:
+                            mul_ops[to_key] = float(raw_value)
+                        except (ValueError, TypeError):
+                            pass
+
+                update_doc = {}
+                if set_ops:
+                    update_doc['$set'] = set_ops
+                if inc_ops:
+                    update_doc['$inc'] = inc_ops
+                if mul_ops:
+                    update_doc['$mul'] = mul_ops
+
+                if update_doc:
+                    try:
+                        db[target_collection].update_one(query, update_doc)
+                    except Exception as e:
+                        import logging
+                        logging.getLogger(__name__).warning(
+                            f"Sub-form delete update failed for {target_collection} lookup={lookup_value}: {e}"
+                        )
+
+
+def _apply_ewn_subform_delete_updates(db, collection_name: str, validated_data: dict, fields: list):
+    """
+    For edit_with_new records: compare new sub-form rows against the original
+    referenced record and apply delete_rules for any rows that were removed.
+    """
+    ewn_field = next((f for f in fields if f.get('type') == 'edit_with_new'), None)
+    if not ewn_field:
+        return
+
+    reference_key = (ewn_field.get('reference_key') or '').strip()
+    if not reference_key:
+        return
+
+    ref_value = validated_data.get(ewn_field['key'])
+    if ref_value is None:
+        return
+
+    # Try numeric coercions to find the referenced old record
+    candidates = [ref_value]
+    try:
+        candidates.append(int(ref_value))
+    except (ValueError, TypeError):
+        pass
+    try:
+        v = float(ref_value)
+        if v not in candidates:
+            candidates.append(v)
+    except (ValueError, TypeError):
+        pass
+
+    old_record = None
+    for candidate in candidates:
+        old_record = db[collection_name].find_one(
+            {reference_key: candidate, 'is_deleted': {'$ne': True}}
+        )
+        if old_record:
+            break
+
+    if not old_record:
+        return
+
+    _apply_subform_delete_updates(db, old_record, validated_data, fields)
+
+
 # ──────────────────────────────────────────────
 # RUNTIME DATA API
 # ──────────────────────────────────────────────
@@ -491,12 +812,10 @@ def _list_records(request, db, collection_name, form_config):
     sort_by   = request.GET.get('sort_by', 'created_at')
     sort_order = -1 if request.GET.get('sort_order', 'desc') == 'desc' else 1
 
-    query = {}
+    query = {'is_deleted': {'$ne': True}}
     if search:
         searchable = [f['key'] for f in form_config.get('fields', []) if f.get('is_searchable')]
         if searchable:
-            query['$or'] = [{'$regex': search, '$options': 'i'} and {field: {'$regex': search, '$options': 'i'}}
-                            for field in searchable]
             query['$or'] = [{field: {'$regex': search, '$options': 'i'}} for field in searchable]
 
     # Per-field filters from query params
@@ -598,7 +917,7 @@ def _create_record(request, db, collection_name, form_config):
                 validated_data[storage_key] = str(label_val)
 
     now = datetime.datetime.utcnow()
-    validated_data.update({'created_by': str(request.user.id), 'created_at': now, 'updated_at': now})
+    validated_data.update({'created_by': str(request.user.id), 'created_at': now, 'updated_at': now, 'is_deleted': False})
     try:
         result = db[collection_name].insert_one(validated_data)
     except DuplicateKeyError as exc:
@@ -608,6 +927,15 @@ def _create_record(request, db, collection_name, form_config):
             status=400,
         )
     validated_data['_id'] = str(result.inserted_id)
+
+    # Apply sub-form record updates (e.g. deduct inventory stock)
+    _apply_subform_updates(db, validated_data, fields)
+
+    # Apply edit-with-new update rules to the referenced old record
+    _apply_edit_with_new_updates(db, collection_name, validated_data, fields)
+
+    # Apply delete rules for sub-form rows removed during edit_with_new
+    _apply_ewn_subform_delete_updates(db, collection_name, validated_data, fields)
 
     db['audit_logs'].insert_one({
         'action': 'create_record', 'collection': collection_name,
@@ -706,6 +1034,12 @@ def record_detail(request, form_name, record_id):
                 {'errors': {field_name: f'{field_name}: this value already exists'}},
                 status=400,
             )
+        # Apply sub-form record updates (e.g. deduct inventory stock)
+        _apply_subform_updates(db, update_data, fields)
+
+        # Apply delete rules for sub-form rows that were removed
+        _apply_subform_delete_updates(db, record, update_data, fields)
+
         db['audit_logs'].insert_one({
             'action': 'update_record', 'collection': collection_name,
             'record_id': record_id, 'user_id': str(request.user.id), 'created_at': now,
@@ -713,11 +1047,28 @@ def record_detail(request, form_name, record_id):
         return Response({'message': 'Record updated successfully'})
 
     elif request.method == 'DELETE':
-        db[collection_name].delete_one({'_id': ObjectId(record_id)})
+        now = datetime.datetime.utcnow()
+        db[collection_name].update_one(
+            {'_id': ObjectId(record_id)},
+            {'$set': {'is_deleted': True, 'updated_at': now, 'deleted_by': str(request.user.id)}}
+        )
+
+        # Apply delete rules for all sub-form rows (record deleted = all rows gone)
+        form_config_del = db['dynamic_forms'].find_one({'form_name': form_name})
+        if form_config_del:
+            fields_del = form_config_del.get('fields', [])
+            empty_subforms = {
+                f['key']: []
+                for f in fields_del
+                if f.get('type') == 'sub_form' and f.get('update_enabled')
+            }
+            if empty_subforms:
+                _apply_subform_delete_updates(db, record, empty_subforms, fields_del)
+
         db['audit_logs'].insert_one({
             'action': 'delete_record', 'collection': collection_name,
             'record_id': record_id, 'user_id': str(request.user.id),
-            'created_at': datetime.datetime.utcnow(),
+            'created_at': now,
         })
         return Response({'message': 'Record deleted successfully'})
 
@@ -743,7 +1094,7 @@ def export_records(request, form_name):
     field_labels    = [f['label'] for f in fields]
     collection_name = f"records_{form_name}"
 
-    records = list(db[collection_name].find({}).sort('created_at', -1))
+    records = list(db[collection_name].find({'is_deleted': {'$ne': True}}).sort('created_at', -1))
 
     output = io.StringIO()
     writer = csv.writer(output)
@@ -821,7 +1172,7 @@ def import_records(request, form_name):
             row_errors.append({'row': row_num, 'errors': errors})
             continue
 
-        record.update({'created_by': str(request.user.id), 'created_at': now, 'updated_at': now})
+        record.update({'created_by': str(request.user.id), 'created_at': now, 'updated_at': now, 'is_deleted': False})
         db[collection_name].insert_one(record)
         inserted += 1
 
@@ -915,8 +1266,12 @@ def bulk_delete_records(request, form_name):
         except Exception:
             pass
 
-    result = db[f"records_{form_name}"].delete_many({'_id': {'$in': object_ids}})
-    return Response({'message': f'{result.deleted_count} records deleted', 'deleted': result.deleted_count})
+    now = datetime.datetime.utcnow()
+    result = db[f"records_{form_name}"].update_many(
+        {'_id': {'$in': object_ids}},
+        {'$set': {'is_deleted': True, 'updated_at': now, 'deleted_by': str(request.user.id)}}
+    )
+    return Response({'message': f'{result.modified_count} records deleted', 'deleted': result.modified_count})
 
 
 # ──────────────────────────────────────────────
@@ -958,7 +1313,7 @@ def list_page_data(request, page_name):
     }
 
     # Build query
-    query = {}
+    query = {'is_deleted': {'$ne': True}}
 
     if search:
         searchable = [f['key'] for f in source_fields if f.get('is_searchable')]
@@ -1334,6 +1689,50 @@ def report_data(request, report_name):
     })
 
 
+def _apply_edit_with_new_updates(db, collection_name: str, record_data: dict, fields: list):
+    """After saving a new record, find edit_with_new fields and apply update rules to the old record."""
+    for field in fields:
+        if field.get('type') != 'edit_with_new':
+            continue
+        if not field.get('update_on_save'):
+            continue
+        reference_key = field.get('reference_key', '').strip()
+        if not reference_key:
+            continue
+        ref_value = record_data.get(field['key'])
+        if ref_value is None:
+            continue
+        rules = field.get('ewn_update_rules', [])
+        set_ops = {r['field_key']: r['value'] for r in rules if r.get('field_key')}
+        if not set_ops:
+            continue
+
+        # Build candidate values to try: string, int, float — uid fields store integers
+        candidates = [ref_value]
+        try:
+            candidates.append(int(ref_value))
+        except (ValueError, TypeError):
+            pass
+        try:
+            v = float(ref_value)
+            if v not in candidates:
+                candidates.append(v)
+        except (ValueError, TypeError):
+            pass
+
+        now = datetime.datetime.utcnow()
+        for candidate in candidates:
+            try:
+                result = db[collection_name].update_one(
+                    {reference_key: candidate, 'is_deleted': {'$ne': True}},
+                    {'$set': {**set_ops, 'updated_at': now}},
+                )
+                if result.modified_count > 0:
+                    break
+            except Exception as e:
+                logger.warning(f"edit_with_new update failed for {collection_name} ref={candidate}: {e}")
+
+
 def _validate_field_value(value, field: dict):
     field_type = field['type']
     validation = field.get('validation', {})
@@ -1373,5 +1772,8 @@ def _validate_field_value(value, field: dict):
         if isinstance(value, list):
             return value
         return []
+
+    elif field_type == 'edit_with_new':
+        return str(value) if value is not None else value
 
     return value

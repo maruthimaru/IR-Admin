@@ -6,18 +6,18 @@
  * Handles validation, submission, and error display.
  */
 
-import { useState, useRef, useEffect, useMemo } from 'react';
-import { InputFormConfig, FormField } from '@/types';
+import { useState, useRef, useEffect, useMemo, useCallback } from 'react';
+import { InputFormConfig, FormField, ApiFilter } from '@/types';
 import { formsAPI } from '@/lib/api';
 import { toast } from 'react-toastify';
-import { Send, AlertCircle, Image as ImageIcon, X, Fingerprint, Plus, Trash2 } from 'lucide-react';
+import { Send, AlertCircle, Image as ImageIcon, X, Fingerprint, Plus, Trash2, CopyPlus } from 'lucide-react';
 import { getCompanyTimezone, nowInTimezone } from '@/lib/datetime';
 
 interface DynamicFormProps {
   config: InputFormConfig;
   onSuccess?: (record: object) => void;
   initialData?: Record<string, unknown>;
-  mode?: 'create' | 'edit';
+  mode?: 'create' | 'edit' | 'edit_with_new';
   recordId?: string;
 }
 
@@ -118,9 +118,9 @@ export default function DynamicForm({
         response = await formsAPI.updateRecord(config.form_name, recordId, values);
         toast.success('Record updated successfully!');
       } else {
+        // 'create' and 'edit_with_new' both create a new record
         response = await formsAPI.createRecord(config.form_name, values);
-        toast.success('Record saved successfully!');
-        // Reset form
+        toast.success(mode === 'edit_with_new' ? 'New record created with reference!' : 'Record saved successfully!');
         setValues({});
       }
       onSuccess?.(response.data.record);
@@ -153,6 +153,9 @@ export default function DynamicForm({
         <h2 className="text-xl font-semibold text-gray-900">{config.display_name}</h2>
         {mode === 'edit' && (
           <span className="badge-warning">Editing Record</span>
+        )}
+        {mode === 'edit_with_new' && (
+          <span className="bg-teal-100 text-teal-700 text-xs font-medium px-2 py-0.5 rounded-full">Edit With New</span>
         )}
       </div>
 
@@ -191,7 +194,7 @@ export default function DynamicForm({
           className="btn-primary flex items-center gap-2"
         >
           <Send size={16} />
-          {isSubmitting ? 'Saving...' : mode === 'edit' ? 'Update Record' : 'Save Record'}
+          {isSubmitting ? 'Saving...' : mode === 'edit' ? 'Update Record' : mode === 'edit_with_new' ? 'Create New Record' : 'Save Record'}
         </button>
       </div>
     </form>
@@ -333,7 +336,7 @@ interface FieldRendererProps {
   allValues?: Record<string, unknown>;
   /** Called to update an extra field (e.g. table_value_key label) alongside the main value */
   onExtraUpdate?: (key: string, value: unknown) => void;
-  mode?: 'create' | 'edit';
+  mode?: 'create' | 'edit' | 'edit_with_new';
   formFields?: FormField[];
 }
 
@@ -507,21 +510,62 @@ async function fetchSourceRecord(
   return data.results?.[0] ?? null;
 }
 
+// ── API Filter Helpers ────────────────────────────────────────
+
+/**
+ * Build query string from api_filters array.
+ * isFormSource=true  → params prefixed with "filter_" (internal records API)
+ * isFormSource=false → params used as-is (external URL)
+ */
+function buildApiFilterParams(
+  filters: ApiFilter[] | undefined,
+  contextValues: Record<string, unknown> | undefined,
+  isFormSource: boolean,
+): string {
+  if (!filters?.length) return '';
+  const parts: string[] = [];
+  for (const f of filters) {
+    if (!f.param) continue;
+    const val = f.value_type === 'static'
+      ? (f.static_value ?? '')
+      : String(contextValues?.[f.field_key ?? ''] ?? '');
+    if (!val) continue;
+    const key = isFormSource ? `filter_${f.param}` : f.param;
+    parts.push(`${encodeURIComponent(key)}=${encodeURIComponent(val)}`);
+  }
+  return parts.join('&');
+}
+
+/** Compute a stable dep string for dynamic filter values so useEffect re-runs when they change */
+function dynamicFilterDeps(
+  filters: ApiFilter[] | undefined,
+  contextValues: Record<string, unknown> | undefined,
+): string {
+  return (filters ?? [])
+    .filter(f => f.value_type === 'dynamic' && f.field_key)
+    .map(f => String(contextValues?.[f.field_key!] ?? ''))
+    .join('|');
+}
+
 // ── API Select Field ──────────────────────────────────────────
 
-function ApiSelectField({ field, value, error, onChange, onExtraUpdate }: FieldRendererProps) {
+function ApiSelectField({ field, value, error, onChange, allValues, onExtraUpdate }: FieldRendererProps) {
   const [options, setOptions] = useState<SelectOption[]>([]);
   const isFormSource = (field.api_source ?? 'url') === 'form';
   const [loading, setLoading] = useState(isFormSource ? Boolean(field.source_form) : Boolean(field.api_url));
   const [fetchError, setFetchError] = useState('');
   const inputClass = `form-input ${error ? 'border-red-400 focus:ring-red-500' : ''}`;
 
+  const dynFilterDeps = dynamicFilterDeps(field.api_filters, allValues);
+
   useEffect(() => {
     if (isFormSource) {
       if (!field.source_form) return;
       setLoading(true);
       setFetchError('');
-      const url = `${INTERNAL_API}/api/v1/forms/records/${field.source_form}/?page_size=500`;
+      let url = `${INTERNAL_API}/api/v1/forms/records/${field.source_form}/?page_size=500`;
+      const filterStr = buildApiFilterParams(field.api_filters, allValues, true);
+      if (filterStr) url += `&${filterStr}`;
       fetch(url, { headers: buildInternalHeaders() })
         .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
         .then(data => {
@@ -539,7 +583,12 @@ function ApiSelectField({ field, value, error, onChange, onExtraUpdate }: FieldR
       if (!field.api_url) return;
       setLoading(true);
       setFetchError('');
-      fetch(field.api_url, buildFetchOptions(field))
+      const filterStr = buildApiFilterParams(field.api_filters, allValues, false);
+      const isPost = (field.api_method ?? 'GET') === 'POST';
+      const baseUrl = isPost
+        ? field.api_url
+        : `${field.api_url}${filterStr ? `${field.api_url.includes('?') ? '&' : '?'}${filterStr}` : ''}`;
+      fetch(baseUrl, buildFetchOptions(field))
         .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
         .then(data => {
           const items = extractArray(data, field.response_path ?? 'data');
@@ -556,7 +605,7 @@ function ApiSelectField({ field, value, error, onChange, onExtraUpdate }: FieldR
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isFormSource, field.source_form, field.api_url, field.api_method, field.api_auth_type, field.api_auth_token,
       field.api_auth_username, field.api_auth_password, field.api_body,
-      field.response_path, field.display_key, field.value_key]);
+      field.response_path, field.display_key, field.value_key, dynFilterDeps]);
 
   const handleSelect = (val: string) => {
     onChange(val);
@@ -610,6 +659,7 @@ function DependentSelectField({ field, value, error, onChange, allValues, onExtr
   const [loading, setLoading] = useState(
     Boolean(parentValue && (isFormSource ? field.source_form : field.api_url))
   );
+  const dynFilterDep = dynamicFilterDeps(field.api_filters, allValues);
 
   useEffect(() => {
     const sourceReady = isFormSource ? Boolean(field.source_form) : Boolean(field.api_url);
@@ -630,8 +680,9 @@ function DependentSelectField({ field, value, error, onChange, allValues, onExtr
     if (isFormSource) {
       // Internal records API with filter param
       const filterKey = field.filter_key || 'id';
-      // Backend _list_records reads filter_<fieldKey> query params
-      const url = `${INTERNAL_API}/api/v1/forms/records/${field.source_form}/?page_size=500&filter_${filterKey}=${encodeURIComponent(parentValue)}`;
+      let url = `${INTERNAL_API}/api/v1/forms/records/${field.source_form}/?page_size=500&filter_${filterKey}=${encodeURIComponent(parentValue)}`;
+      const extraStr = buildApiFilterParams(field.api_filters, allValues, true);
+      if (extraStr) url += `&${extraStr}`;
       fetch(url, { headers: buildInternalHeaders() })
         .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
         .then(data => {
@@ -648,16 +699,17 @@ function DependentSelectField({ field, value, error, onChange, allValues, onExtr
     } else {
       const filterKey = field.filter_key || 'id';
       const isPost = (field.api_method ?? 'GET') === 'POST';
+      const extraStr = buildApiFilterParams(field.api_filters, allValues, false);
       const url = isPost
         ? field.api_url!
-        : `${field.api_url}?${filterKey}=${encodeURIComponent(parentValue)}`;
+        : `${field.api_url}?${filterKey}=${encodeURIComponent(parentValue)}${extraStr ? `&${extraStr}` : ''}`;
 
       const fetchOpts = buildFetchOptions(field);
       if (isPost) {
         if (field.api_body) {
           const resolved = field.api_body.replace(/\{\{(\w+)\}\}/g, (_, token: string) => {
             if (token === 'parent_value' || token === field.depends_on) return parentValue;
-            return '';
+            return String(allValues?.[token] ?? '');
           });
           fetchOpts.body = resolved;
         } else {
@@ -680,7 +732,8 @@ function DependentSelectField({ field, value, error, onChange, allValues, onExtr
         .finally(() => setLoading(false));
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [parentValue, isFormSource, field.source_form, field.api_url, field.filter_key, field.response_path, field.display_key, field.value_key]);
+  }, [parentValue, isFormSource, field.source_form, field.api_url, field.filter_key,
+      field.response_path, field.display_key, field.value_key, dynFilterDep]);
 
   const noParent = !parentValue;
   const parentLabel = field.depends_on?.replace(/_/g, ' ') ?? 'parent';
@@ -754,8 +807,8 @@ function FormulaResultField({ field, allValues, error, onChange }: FieldRenderer
   return (
     <div className="space-y-1">
       <div className="relative">
-        {field.type === 'currency' && (
-          <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500 text-sm">$</span>
+        {field.type === 'currency' && field.currency_symbol && (
+          <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500 text-sm">{field.currency_symbol}</span>
         )}
         {field.type === 'percentage' && (
           <span className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-500 text-sm">%</span>
@@ -763,7 +816,7 @@ function FormulaResultField({ field, allValues, error, onChange }: FieldRenderer
         <input
           type="text"
           readOnly
-          className={`${inputClass} ${field.type === 'currency' ? 'pl-7' : ''} ${field.type === 'percentage' ? 'pr-7' : ''}`}
+          className={`${inputClass} ${field.type === 'currency' && field.currency_symbol ? 'pl-7' : ''} ${field.type === 'percentage' ? 'pr-7' : ''}`}
           value={display}
           placeholder="Computed…"
         />
@@ -801,8 +854,8 @@ function ConditionalField({ field, value, error, onChange, allValues }: FieldRen
   return (
     <div className="space-y-1">
       <div className="relative">
-        {field.type === 'currency' && (
-          <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500 text-sm">$</span>
+        {field.type === 'currency' && field.currency_symbol && (
+          <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500 text-sm">{field.currency_symbol}</span>
         )}
         {field.type === 'percentage' && (
           <span className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-500 text-sm">%</span>
@@ -810,7 +863,7 @@ function ConditionalField({ field, value, error, onChange, allValues }: FieldRen
         <input
           type="number"
           readOnly
-          className={`${inputClass} ${field.type === 'currency' ? 'pl-8' : ''} ${field.type === 'percentage' ? 'pr-8' : ''}`}
+          className={`${inputClass} ${field.type === 'currency' && field.currency_symbol ? 'pl-8' : ''} ${field.type === 'percentage' ? 'pr-8' : ''}`}
           value={display}
           placeholder={conditionValue ? `Formula: ${formula || 'not set'}` : 'Select condition field…'}
         />
@@ -866,13 +919,13 @@ function ApiNumberField({ field, error, onChange }: FieldRendererProps) {
   return (
     <div className="space-y-1">
       <div className="relative">
-        {field.type === 'currency' && (
-          <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500 text-sm">$</span>
+        {field.type === 'currency' && field.currency_symbol && (
+          <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500 text-sm">{field.currency_symbol}</span>
         )}
         <input
           type="text"
           readOnly
-          className={`${inputClass} ${field.type === 'currency' ? 'pl-7' : ''}`}
+          className={`${inputClass} ${field.type === 'currency' && field.currency_symbol ? 'pl-7' : ''}`}
           value={loading ? '' : (apiValue !== null ? String(apiValue) : '')}
           placeholder={loading ? 'Fetching…' : 'API value'}
         />
@@ -979,11 +1032,11 @@ function SubFormConditionalCell({ field, value, onChange, rowValues }: {
   const cls = 'form-input py-1 text-sm min-w-0 bg-gray-50 cursor-not-allowed';
   return (
     <div className="relative">
-      {field.type === 'currency' && (
-        <span className="absolute left-2 top-1/2 -translate-y-1/2 text-gray-400 text-xs">$</span>
+      {field.type === 'currency' && field.currency_symbol && (
+        <span className="absolute left-2 top-1/2 -translate-y-1/2 text-gray-400 text-xs">{field.currency_symbol}</span>
       )}
       <input type="number" readOnly
-        className={`${cls} ${field.type === 'currency' ? 'pl-5' : ''}`}
+        className={`${cls} ${field.type === 'currency' && field.currency_symbol ? 'pl-5' : ''}`}
         value={computed !== null ? computed : (value !== undefined ? String(value) : '')}
         placeholder={conditionValue ? (formula ? 'Calculating…' : 'No rule') : 'Auto'} />
     </div>
@@ -992,18 +1045,23 @@ function SubFormConditionalCell({ field, value, onChange, rowValues }: {
 
 // ── Sub Form Field ───────────────────────────────────────────
 
-function SubFormApiSelectCell({ field, value, onChange }: { field: FormField; value: unknown; onChange: (v: unknown) => void }) {
+function SubFormApiSelectCell({ field, value, onChange, rowValues }: {
+  field: FormField; value: unknown; onChange: (v: unknown) => void; rowValues: Record<string, unknown>;
+}) {
   const [options, setOptions] = useState<SelectOption[]>([]);
   const isFormSource = (field.api_source ?? 'url') === 'form';
-  // Start in loading state so the select is never blank on initial render (important for edit mode)
   const [loading, setLoading] = useState(isFormSource ? Boolean(field.source_form) : Boolean(field.api_url));
   const cls = 'form-input py-1 text-sm min-w-0';
+  const dynFilterDep = dynamicFilterDeps(field.api_filters, rowValues);
 
   useEffect(() => {
     if (isFormSource) {
       if (!field.source_form) return;
       setLoading(true);
-      fetch(`${INTERNAL_API}/api/v1/forms/records/${field.source_form}/?page_size=500`, { headers: buildInternalHeaders() })
+      let url = `${INTERNAL_API}/api/v1/forms/records/${field.source_form}/?page_size=500`;
+      const filterStr = buildApiFilterParams(field.api_filters, rowValues, true);
+      if (filterStr) url += `&${filterStr}`;
+      fetch(url, { headers: buildInternalHeaders() })
         .then(r => { if (!r.ok) throw new Error(); return r.json(); })
         .then(data => {
           const items: Record<string, unknown>[] = data.results ?? [];
@@ -1017,7 +1075,11 @@ function SubFormApiSelectCell({ field, value, onChange }: { field: FormField; va
     } else {
       if (!field.api_url) return;
       setLoading(true);
-      fetch(field.api_url, buildFetchOptions(field))
+      const filterStr = buildApiFilterParams(field.api_filters, rowValues, false);
+      const baseUrl = filterStr
+        ? `${field.api_url}${field.api_url.includes('?') ? '&' : '?'}${filterStr}`
+        : field.api_url;
+      fetch(baseUrl, buildFetchOptions(field))
         .then(r => { if (!r.ok) throw new Error(); return r.json(); })
         .then(data => {
           const items = extractArray(data, field.response_path ?? 'data');
@@ -1030,7 +1092,7 @@ function SubFormApiSelectCell({ field, value, onChange }: { field: FormField; va
         .finally(() => setLoading(false));
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isFormSource, field.source_form, field.api_url]);
+  }, [isFormSource, field.source_form, field.api_url, dynFilterDep]);
 
   return (
     <select className={cls} value={String(value ?? '')} onChange={e => onChange(e.target.value)} disabled={loading}>
@@ -1051,6 +1113,7 @@ function SubFormDependentSelectCell({ field, value, onChange, rowValues }: {
     Boolean(parentValue && (isFormSource ? field.source_form : field.api_url))
   );
   const cls = 'form-input py-1 text-sm min-w-0';
+  const dynFilterDep = dynamicFilterDeps(field.api_filters, rowValues);
 
   useEffect(() => {
     if (!parentValue) { setOptions([]); return; }
@@ -1059,7 +1122,9 @@ function SubFormDependentSelectCell({ field, value, onChange, rowValues }: {
     setLoading(true);
     if (isFormSource) {
       const filterKey = field.filter_key || 'id';
-      const url = `${INTERNAL_API}/api/v1/forms/records/${field.source_form}/?page_size=500&filter_${filterKey}=${encodeURIComponent(parentValue)}`;
+      let url = `${INTERNAL_API}/api/v1/forms/records/${field.source_form}/?page_size=500&filter_${filterKey}=${encodeURIComponent(parentValue)}`;
+      const extraStr = buildApiFilterParams(field.api_filters, rowValues, true);
+      if (extraStr) url += `&${extraStr}`;
       fetch(url, { headers: buildInternalHeaders() })
         .then(r => { if (!r.ok) throw new Error(); return r.json(); })
         .then(data => {
@@ -1073,7 +1138,8 @@ function SubFormDependentSelectCell({ field, value, onChange, rowValues }: {
         .finally(() => setLoading(false));
     } else {
       const filterKey = field.filter_key || 'id';
-      const url = `${field.api_url}?${filterKey}=${encodeURIComponent(parentValue)}`;
+      const extraStr = buildApiFilterParams(field.api_filters, rowValues, false);
+      const url = `${field.api_url}?${filterKey}=${encodeURIComponent(parentValue)}${extraStr ? `&${extraStr}` : ''}`;
       fetch(url, buildFetchOptions(field))
         .then(r => { if (!r.ok) throw new Error(); return r.json(); })
         .then(data => {
@@ -1087,7 +1153,7 @@ function SubFormDependentSelectCell({ field, value, onChange, rowValues }: {
         .finally(() => setLoading(false));
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [parentValue, isFormSource, field.source_form, field.api_url]);
+  }, [parentValue, isFormSource, field.source_form, field.api_url, dynFilterDep]);
 
   return (
     <select className={cls} value={String(value ?? '')} onChange={e => onChange(e.target.value)} disabled={loading || !parentValue}>
@@ -1166,11 +1232,11 @@ function SubFormFormulaCell({ field, value, onChange, rowValues }: {
   const cls = 'form-input py-1 text-sm min-w-0 bg-gray-50 cursor-not-allowed';
   return (
     <div className="relative">
-      {field.type === 'currency' && (
-        <span className="absolute left-2 top-1/2 -translate-y-1/2 text-gray-400 text-xs">$</span>
+      {field.type === 'currency' && field.currency_symbol && (
+        <span className="absolute left-2 top-1/2 -translate-y-1/2 text-gray-400 text-xs">{field.currency_symbol}</span>
       )}
       <input type="number" readOnly
-        className={`${cls} ${field.type === 'currency' ? 'pl-5' : ''}`}
+        className={`${cls} ${field.type === 'currency' && field.currency_symbol ? 'pl-5' : ''}`}
         value={computed !== null ? computed : (value !== undefined ? String(value) : '')}
         placeholder="Formula" />
     </div>
@@ -1208,11 +1274,11 @@ function SubFormFieldLookupCell({ field, value, onChange, rowValues, siblingFiel
   const cls = `form-input py-1 text-sm min-w-0 bg-gray-50 ${isFetching ? 'animate-pulse' : ''}`;
   return (
     <div className="relative">
-      {field.type === 'currency' && (
-        <span className="absolute left-2 top-1/2 -translate-y-1/2 text-gray-400 text-xs">$</span>
+      {field.type === 'currency' && field.currency_symbol && (
+        <span className="absolute left-2 top-1/2 -translate-y-1/2 text-gray-400 text-xs">{field.currency_symbol}</span>
       )}
       <input type={isNumeric ? 'number' : 'text'} readOnly
-        className={`${cls} ${field.type === 'currency' ? 'pl-5' : ''}`}
+        className={`${cls} ${field.type === 'currency' && field.currency_symbol ? 'pl-5' : ''}`}
         value={String(value ?? '')}
         placeholder={isFetching ? 'Loading…' : 'Auto…'} />
     </div>
@@ -1312,7 +1378,7 @@ function SubFormCellRenderer({ field, value, onChange, rowValues, siblingFields 
         </div>
       );
     case 'api_select':
-      return <SubFormApiSelectCell field={field} value={value} onChange={onChange} />;
+      return <SubFormApiSelectCell field={field} value={value} onChange={onChange} rowValues={rowValues} />;
     case 'dependent_select':
       return <SubFormDependentSelectCell field={field} value={value} onChange={onChange} rowValues={rowValues} />;
     default:
@@ -1339,13 +1405,24 @@ function SubFormField({ field, value, error, onChange, onExtraUpdate }: FieldRen
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const addRow = () => { const r = [...rows, {}]; onChange(r); pushSums(r); };
-  const delRow = (i: number) => { const r = rows.filter((_, idx) => idx !== i); onChange(r); pushSums(r); };
-  const updCell = (ri: number, key: string, val: unknown) => {
+  // Keep a mutable ref to the latest updCell logic so that async field-lookup
+  // fetches always write on top of the *current* rows, not a stale snapshot.
+  // Without this, two concurrent lookups both capture the same old rows and
+  // whichever resolves second silently overwrites the first one's result.
+  const updCellRef = useRef<(ri: number, key: string, val: unknown) => void>(null!);
+  updCellRef.current = (ri: number, key: string, val: unknown) => {
     const r = rows.map((row, idx) => idx === ri ? { ...row, [key]: val } : row);
     onChange(r);
     pushSums(r);
   };
+  // Stable wrapper so children / async callbacks hold a fixed reference
+  const stableUpdCell = useCallback((ri: number, key: string, val: unknown) => {
+    updCellRef.current(ri, key, val);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const addRow = () => { const r = [...rows, {}]; onChange(r); pushSums(r); };
+  const delRow = (i: number) => { const r = rows.filter((_, idx) => idx !== i); onChange(r); pushSums(r); };
 
   return (
     <div className="space-y-2">
@@ -1373,7 +1450,7 @@ function SubFormField({ field, value, error, onChange, onExtraUpdate }: FieldRen
                   {subFields.filter(f => !f.hidden).map(sf => (
                     <td key={sf.key} className="px-3 py-1.5">
                       <SubFormCellRenderer field={sf} value={row[sf.key]}
-                        onChange={val => updCell(ri, sf.key, val)}
+                        onChange={val => stableUpdCell(ri, sf.key, val)}
                         rowValues={row} siblingFields={subFields} />
                     </td>
                   ))}
@@ -1398,7 +1475,7 @@ function SubFormField({ field, value, error, onChange, onExtraUpdate }: FieldRen
                     const display = Math.round(sum * 1e9) / 1e9;
                     return (
                       <td key={sf.key} className="px-3 py-1.5 text-xs font-bold text-violet-700 whitespace-nowrap">
-                        {sf.type === 'currency' ? '$' : 'Σ '}{display}
+                        {sf.type === 'currency' ? (sf.currency_symbol || '') : 'Σ '}{display}
                       </td>
                     );
                   })}
@@ -1461,11 +1538,11 @@ function FieldLookupTextField({ field, value, error, onChange, allValues, mode, 
     if (isNumeric) {
       return (
         <div className="relative">
-          {field.type === 'currency' && (
-            <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500 text-sm">$</span>
+          {field.type === 'currency' && field.currency_symbol && (
+            <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500 text-sm">{field.currency_symbol}</span>
           )}
           <input type="number"
-            className={`${baseInputCls} ${field.type === 'currency' ? 'pl-7' : ''}`}
+            className={`${baseInputCls} ${field.type === 'currency' && field.currency_symbol ? 'pl-7' : ''}`}
             placeholder={field.placeholder}
             value={value !== undefined ? String(value) : ''}
             onChange={e => onChange(e.target.value ? parseFloat(e.target.value) : '')} />
@@ -1491,8 +1568,8 @@ function FieldLookupTextField({ field, value, error, onChange, allValues, mode, 
   return (
     <div className="space-y-1">
       <div className="relative">
-        {field.type === 'currency' && (
-          <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500 text-sm">$</span>
+        {field.type === 'currency' && field.currency_symbol && (
+          <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500 text-sm">{field.currency_symbol}</span>
         )}
         {isTextarea ? (
           <textarea readOnly rows={4}
@@ -1501,7 +1578,7 @@ function FieldLookupTextField({ field, value, error, onChange, allValues, mode, 
             value={String(value ?? '')} />
         ) : (
           <input type={isNumeric ? 'number' : 'text'} readOnly
-            className={`${readonlyCls} ${field.type === 'currency' ? 'pl-7' : ''}`}
+            className={`${readonlyCls} ${field.type === 'currency' && field.currency_symbol ? 'pl-7' : ''}`}
             placeholder={placeholder}
             value={String(value ?? '')} />
         )}
@@ -1597,15 +1674,15 @@ function FieldRenderer({ field, value, error, onChange, allValues, onExtraUpdate
         }
         return (
           <div className="relative">
-            {field.type === 'currency' && (
-              <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500 text-sm">$</span>
+            {field.type === 'currency' && field.currency_symbol && (
+              <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500 text-sm">{field.currency_symbol}</span>
             )}
             {field.type === 'percentage' && (
               <span className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-500 text-sm">%</span>
             )}
             <input
               type="number"
-              className={`${inputClass} ${field.type === 'currency' ? 'pl-7' : ''} ${field.type === 'percentage' ? 'pr-7' : ''}`}
+              className={`${inputClass} ${field.type === 'currency' && field.currency_symbol ? 'pl-7' : ''} ${field.type === 'percentage' ? 'pr-7' : ''}`}
               placeholder={field.placeholder}
               value={value !== undefined ? String(value) : ''}
               onChange={e => onChange(e.target.value ? parseFloat(e.target.value) : '')}
@@ -1745,6 +1822,7 @@ function FieldRenderer({ field, value, error, onChange, allValues, onExtraUpdate
             value={value}
             error={error}
             onChange={onChange}
+            allValues={allValues}
             onExtraUpdate={onExtraUpdate}
           />
         );
@@ -1791,6 +1869,18 @@ function FieldRenderer({ field, value, error, onChange, allValues, onExtraUpdate
             onChange={onChange} allValues={allValues}
             onExtraUpdate={onExtraUpdate}
           />
+        );
+
+      case 'edit_with_new':
+        // Always read-only — locked reference value from the old record
+        return (
+          <div className="flex items-center gap-2 form-input bg-teal-50 border-teal-200 cursor-not-allowed select-none">
+            <CopyPlus size={14} className="shrink-0 text-teal-500" />
+            {value !== undefined && value !== null && value !== ''
+              ? <span className="font-mono text-teal-700">{String(value)}</span>
+              : <span className="italic text-xs text-teal-400">Reference value will appear here</span>
+            }
+          </div>
         );
 
       default:

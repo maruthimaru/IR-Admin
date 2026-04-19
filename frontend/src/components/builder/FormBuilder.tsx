@@ -10,13 +10,13 @@ import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { formsAPI } from '@/lib/api';
 import { DATE_FORMATS, TIME_FORMATS, TIMEZONE_OPTIONS } from '@/lib/datetime';
-import { FormField, FieldType, InputFormConfig } from '@/types';
+import { FormField, FieldType, InputFormConfig, SubFormUpdateRule, SubFormUpdateTarget, ApiFilter, EditWithNewRule } from '@/types';
 import { toast } from 'react-toastify';
 import {
   Plus, Trash2, GripVertical, ChevronDown, ChevronUp,
   Save, Type, Hash, Mail, Phone, Calendar, List,
   CheckSquare, AlignLeft, Upload, DollarSign, Link, Star,
-  Image as ImageIcon, Globe, GitBranch, Fingerprint, Clock, LayoutList,
+  Image as ImageIcon, Globe, GitBranch, Fingerprint, Clock, LayoutList, CopyPlus,
   type LucideIcon
 } from 'lucide-react';
 
@@ -39,6 +39,7 @@ const FIELD_TYPES: { type: FieldType; label: string; icon: LucideIcon }[] = [
   { type: 'uid',              label: 'UID (Auto)',       icon: Fingerprint },
   { type: 'time',             label: 'Time',             icon: Clock },
   { type: 'sub_form',         label: 'Sub Form',         icon: LayoutList },
+  { type: 'edit_with_new',    label: 'Edit With New',    icon: CopyPlus },
 ];
 
 interface FormBuilderProps {
@@ -72,8 +73,367 @@ function configToBuilderFields(fields: FormField[]): BuilderField[] {
       show_footer_sum: sf.show_footer_sum === true,
       is_sortable:     sf.is_sortable     === true,
       is_searchable:   sf.is_searchable   === true,
+      api_filters:     sf.api_filters     ?? [],
     })),
+    update_enabled:   f.update_enabled   ?? false,
+    update_targets:   f.update_targets   ?? [],
+    currency_symbol:  f.currency_symbol  ?? '',
+    api_filters:      f.api_filters      ?? [],
+    reference_key:    f.reference_key    ?? '',
+    update_on_save:   f.update_on_save   ?? false,
+    ewn_update_rules: (f.ewn_update_rules ?? []) as EditWithNewRule[],
   }));
+}
+
+// ── Sub-Form Update Config ───────────────────────────────────────────────────
+
+function RuleEditor({ rule, idx, subFormFields, targetFields, updateRule, removeRule }: {
+  rule: SubFormUpdateRule;
+  idx: number;
+  subFormFields: { label: string; value: string }[];
+  targetFields: { label: string; value: string }[];
+  updateRule: (idx: number, patch: Partial<SubFormUpdateRule>) => void;
+  removeRule: (idx: number) => void;
+}) {
+  const vt = rule.value_type ?? 'field';
+  const condMap = rule.condition_map ?? [];
+
+  const updateCondMap = (ci: number, patch: { when?: string; value?: string }) => {
+    const next = condMap.map((c, i) => i === ci ? { ...c, ...patch } : c);
+    updateRule(idx, { condition_map: next });
+  };
+
+  return (
+    <div className="border border-orange-200 rounded-lg p-3 space-y-2 bg-white">
+      {/* Header row: target field + operation + remove */}
+      <div className="flex gap-2 items-center">
+        <div className="flex-1">
+          <label className="block text-xs text-gray-500 mb-0.5">Target Field</label>
+          <select
+            className="form-input text-xs"
+            value={rule.to_key}
+            onChange={e => updateRule(idx, { to_key: e.target.value })}
+          >
+            <option value="">— Select target field —</option>
+            {targetFields.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+          </select>
+        </div>
+        <div className="w-32">
+          <label className="block text-xs text-gray-500 mb-0.5">Operation</label>
+          <select
+            className="form-input text-xs"
+            value={rule.operation}
+            onChange={e => updateRule(idx, { operation: e.target.value as SubFormUpdateRule['operation'] })}
+          >
+            <option value="set">Set (=)</option>
+            <option value="increment">Add (+)</option>
+            <option value="decrement">Subtract (−)</option>
+            <option value="multiply">Multiply (×)</option>
+          </select>
+        </div>
+        <button
+          type="button"
+          onClick={() => removeRule(idx)}
+          className="mt-4 text-red-400 hover:text-red-600 text-sm px-1 shrink-0"
+        >✕</button>
+      </div>
+
+      {/* Value type tabs */}
+      <div>
+        <label className="block text-xs text-gray-500 mb-1">Value Source</label>
+        <div className="flex gap-1">
+          {(['field', 'static', 'conditional'] as const).map(vType => (
+            <button
+              key={vType}
+              type="button"
+              onClick={() => updateRule(idx, { value_type: vType })}
+              className={`px-2 py-1 text-xs rounded border transition-colors ${
+                vt === vType
+                  ? 'bg-orange-600 text-white border-orange-600'
+                  : 'border-gray-300 text-gray-600 hover:border-orange-400'
+              }`}
+            >
+              {vType === 'field' ? 'From Field' : vType === 'static' ? 'Static Value' : 'Conditional'}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* From Field */}
+      {vt === 'field' && (
+        <div>
+          <label className="block text-xs text-gray-500 mb-0.5">Sub-form Field</label>
+          <select
+            className="form-input text-xs"
+            value={rule.from_key ?? ''}
+            onChange={e => updateRule(idx, { from_key: e.target.value })}
+          >
+            <option value="">— Select sub-form field —</option>
+            {subFormFields.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+          </select>
+        </div>
+      )}
+
+      {/* Static Value */}
+      {vt === 'static' && (
+        <div>
+          <label className="block text-xs text-gray-500 mb-0.5">Static Value</label>
+          <input
+            type="text"
+            className="form-input text-xs"
+            value={rule.static_value ?? ''}
+            onChange={e => updateRule(idx, { static_value: e.target.value })}
+            placeholder='e.g. "sold", "in_stock", "active"'
+          />
+        </div>
+      )}
+
+      {/* Conditional */}
+      {vt === 'conditional' && (
+        <div className="space-y-2">
+          <div>
+            <label className="block text-xs text-gray-500 mb-0.5">Condition Field (sub-form)</label>
+            <select
+              className="form-input text-xs"
+              value={rule.condition_field ?? ''}
+              onChange={e => updateRule(idx, { condition_field: e.target.value })}
+            >
+              <option value="">— Select field —</option>
+              {subFormFields.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+            </select>
+          </div>
+
+          <div className="space-y-1">
+            <label className="block text-xs text-gray-500">Condition Map (When → Set value)</label>
+            {condMap.map((c, ci) => (
+              <div key={ci} className="flex gap-2 items-center">
+                <input
+                  type="text"
+                  className="form-input text-xs flex-1"
+                  placeholder="When equals…"
+                  value={c.when}
+                  onChange={e => updateCondMap(ci, { when: e.target.value })}
+                />
+                <span className="text-xs text-gray-400">→</span>
+                <input
+                  type="text"
+                  className="form-input text-xs flex-1"
+                  placeholder="Set value"
+                  value={c.value}
+                  onChange={e => updateCondMap(ci, { value: e.target.value })}
+                />
+                <button
+                  type="button"
+                  onClick={() => updateRule(idx, { condition_map: condMap.filter((_, i) => i !== ci) })}
+                  className="text-red-400 hover:text-red-600 text-xs"
+                >✕</button>
+              </div>
+            ))}
+            <button
+              type="button"
+              onClick={() => updateRule(idx, { condition_map: [...condMap, { when: '', value: '' }] })}
+              className="text-xs text-orange-600 hover:text-orange-800 font-medium"
+            >+ Add condition</button>
+          </div>
+
+          <div>
+            <label className="block text-xs text-gray-500 mb-0.5">Default Value (no match)</label>
+            <input
+              type="text"
+              className="form-input text-xs"
+              value={rule.default_value ?? ''}
+              onChange={e => updateRule(idx, { default_value: e.target.value })}
+              placeholder="e.g. in_stock"
+            />
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// One target block (target form + lookup key + rules)
+function TargetBlock({ target, tidx, formOptions, subFormFields, allTargets, onUpdateTargets }: {
+  target: SubFormUpdateTarget;
+  tidx: number;
+  formOptions: { label: string; value: string }[];
+  subFormFields: { label: string; value: string }[];
+  allTargets: SubFormUpdateTarget[];
+  onUpdateTargets: (next: SubFormUpdateTarget[]) => void;
+}) {
+  const [open, setOpen] = useState(true);
+
+  const { data: targetConfig } = useQuery({
+    queryKey: ['form-config-target', target.target_form],
+    queryFn: () => formsAPI.getConfig(target.target_form).then(r => r.data),
+    enabled: Boolean(target.target_form),
+  });
+
+  const targetFields: { label: string; value: string }[] = (targetConfig?.fields ?? [])
+    .filter((f: FormField) => f.key)
+    .map((f: FormField) => ({ label: `${f.label} (${f.key})`, value: f.key }));
+
+  const patch = (p: Partial<SubFormUpdateTarget>) => {
+    onUpdateTargets(allTargets.map((t, i) => i === tidx ? { ...t, ...p } : t));
+  };
+
+  const updateRule = (ridx: number, rp: Partial<SubFormUpdateRule>) => {
+    patch({ rules: target.rules.map((r, i) => i === ridx ? { ...r, ...rp } : r) });
+  };
+
+  const addRule = () => patch({ rules: [...target.rules, { to_key: '', operation: 'set', value_type: 'field', from_key: '' }] });
+
+  const removeRule = (ridx: number) => patch({ rules: target.rules.filter((_, i) => i !== ridx) });
+
+  const deleteRules: SubFormUpdateRule[] = target.delete_rules ?? [];
+
+  const updateDeleteRule = (ridx: number, rp: Partial<SubFormUpdateRule>) => {
+    patch({ delete_rules: deleteRules.map((r, i) => i === ridx ? { ...r, ...rp } : r) });
+  };
+
+  const addDeleteRule = () => patch({ delete_rules: [...deleteRules, { to_key: '', operation: 'set', value_type: 'static', static_value: '' }] });
+
+  const removeDeleteRule = (ridx: number) => patch({ delete_rules: deleteRules.filter((_, i) => i !== ridx) });
+
+  const removeTarget = () => onUpdateTargets(allTargets.filter((_, i) => i !== tidx));
+
+  const label = target.target_form
+    ? formOptions.find(o => o.value === target.target_form)?.label ?? target.target_form
+    : `Target ${tidx + 1}`;
+
+  return (
+    <div className="border border-orange-200 rounded-lg overflow-hidden">
+      {/* Header */}
+      <div className="flex items-center justify-between px-3 py-2 bg-orange-50 cursor-pointer"
+        onClick={() => setOpen(o => !o)}>
+        <span className="text-xs font-semibold text-orange-800">{label}</span>
+        <div className="flex items-center gap-2">
+          <button type="button" onClick={e => { e.stopPropagation(); removeTarget(); }}
+            className="text-red-400 hover:text-red-600 text-xs">✕ Remove</button>
+          <span className="text-gray-400 text-xs">{open ? '▲' : '▼'}</span>
+        </div>
+      </div>
+
+      {open && (
+        <div className="p-3 space-y-3 bg-white">
+          {/* Target form picker */}
+          <div>
+            <label className="block text-xs font-medium text-gray-600 mb-1">Target Form</label>
+            <select className="form-input text-sm" value={target.target_form}
+              onChange={e => patch({ target_form: e.target.value, lookup_key: '', rules: [] })}>
+              <option value="">— Select form —</option>
+              {formOptions.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+            </select>
+          </div>
+
+          {target.target_form && (
+            <>
+              {/* Lookup key */}
+              <div>
+                <label className="block text-xs font-medium text-gray-600 mb-1">
+                  Lookup Key — sub-form field that holds the target record ID
+                </label>
+                <select className="form-input text-sm" value={target.lookup_key}
+                  onChange={e => patch({ lookup_key: e.target.value })}>
+                  <option value="">— Select sub-form field —</option>
+                  {subFormFields.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+                </select>
+              </div>
+
+              {/* Update Rules */}
+              <div className="space-y-2">
+                <p className="text-xs font-medium text-gray-600">Update Rules <span className="text-gray-400 font-normal">(on add / save)</span></p>
+                {target.rules.length === 0 && (
+                  <p className="text-xs text-gray-400 italic">No rules yet.</p>
+                )}
+                {target.rules.map((rule, ridx) => (
+                  <RuleEditor key={ridx} rule={rule} idx={ridx}
+                    subFormFields={subFormFields} targetFields={targetFields}
+                    updateRule={updateRule} removeRule={removeRule} />
+                ))}
+                <button type="button" onClick={addRule}
+                  className="text-xs text-orange-600 hover:text-orange-800 font-medium">
+                  + Add Rule
+                </button>
+              </div>
+
+              {/* Delete Rules */}
+              <div className="space-y-2 border-t border-orange-100 pt-3">
+                <p className="text-xs font-medium text-red-600">Delete Rules <span className="text-gray-400 font-normal">(when row is removed)</span></p>
+                {deleteRules.length === 0 && (
+                  <p className="text-xs text-gray-400 italic">No delete rules yet.</p>
+                )}
+                {deleteRules.map((rule, ridx) => (
+                  <RuleEditor key={ridx} rule={rule} idx={ridx}
+                    subFormFields={subFormFields} targetFields={targetFields}
+                    updateRule={updateDeleteRule} removeRule={removeDeleteRule} />
+                ))}
+                <button type="button" onClick={addDeleteRule}
+                  className="text-xs text-red-500 hover:text-red-700 font-medium">
+                  + Add Delete Rule
+                </button>
+              </div>
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SubFormUpdateConfig({ field, onUpdate }: {
+  field: BuilderField;
+  onUpdate: (patch: Partial<BuilderField>) => void;
+}) {
+  const { data: allFormsRaw } = useQuery({
+    queryKey: ['forms', 'input-list'],
+    queryFn: () => formsAPI.listConfigs({ type: 'input' }).then(r => r.data),
+  });
+
+  const formsList: { form_name: string; display_name: string }[] =
+    Array.isArray(allFormsRaw) ? allFormsRaw
+      : ((allFormsRaw as { results?: unknown[] } | undefined)?.results ?? []) as { form_name: string; display_name: string }[];
+
+  const formOptions = formsList.map(f => ({ label: f.display_name || f.form_name, value: f.form_name }));
+
+  const subFormFields = (field.subFormBuilderFields ?? [])
+    .filter(sf => sf.key)
+    .map(sf => ({ label: `${sf.label || sf.key} (${sf.key})`, value: sf.key! }));
+
+  const targets: SubFormUpdateTarget[] = (field.update_targets ?? []) as SubFormUpdateTarget[];
+
+  const addTarget = () => {
+    onUpdate({ update_targets: [...targets, { target_form: '', lookup_key: '', rules: [], delete_rules: [] }] });
+  };
+
+  return (
+    <div className="space-y-3">
+      <label className="flex items-center gap-2 cursor-pointer">
+        <input type="checkbox" className="form-checkbox"
+          checked={field.update_enabled ?? false}
+          onChange={e => onUpdate({ update_enabled: e.target.checked })} />
+        <span className="text-sm font-medium text-gray-700">Enable Record Update on Save</span>
+      </label>
+
+      {field.update_enabled && (
+        <div className="space-y-2 pl-1">
+          {targets.length === 0 && (
+            <p className="text-xs text-gray-400 italic">No target forms yet — add one below.</p>
+          )}
+          {targets.map((target, tidx) => (
+            <TargetBlock key={tidx} target={target} tidx={tidx}
+              formOptions={formOptions} subFormFields={subFormFields}
+              allTargets={targets}
+              onUpdateTargets={next => onUpdate({ update_targets: next })} />
+          ))}
+          <button type="button" onClick={addTarget}
+            className="text-xs text-orange-600 hover:text-orange-800 font-medium border border-orange-300 rounded px-3 py-1.5 hover:bg-orange-50 transition-colors">
+            + Add Target Form
+          </button>
+        </div>
+      )}
+    </div>
+  );
 }
 
 // ── Form Source Config sub-component ────────────────────────────────────────
@@ -284,6 +644,131 @@ function ConditionalConfig({ field, allFields, onUpdate }: {
   );
 }
 
+// ── API Filters Config ───────────────────────────────────────────────────────
+
+function ApiFiltersConfig({ field, allFields, onUpdate }: {
+  field: BuilderField;
+  allFields: BuilderField[];
+  onUpdate: (patch: Partial<BuilderField>) => void;
+}) {
+  const filters: ApiFilter[] = field.api_filters ?? [];
+  const isFormSource = (field.api_source ?? 'url') === 'form';
+
+  const addFilter = () => {
+    onUpdate({ api_filters: [...filters, { param: '', value_type: 'static', static_value: '' }] });
+  };
+
+  const updateFilter = (idx: number, patch: Partial<ApiFilter>) => {
+    const updated = filters.map((f, i) => i === idx ? { ...f, ...patch } : f);
+    onUpdate({ api_filters: updated });
+  };
+
+  const removeFilter = (idx: number) => {
+    onUpdate({ api_filters: filters.filter((_, i) => i !== idx) });
+  };
+
+  const otherFields = allFields.filter(f => f.id !== field.id && f.key);
+
+  return (
+    <div className="pt-1 border-t border-indigo-200 space-y-2">
+      <div className="flex items-center justify-between">
+        <span className="text-xs font-semibold text-indigo-700">
+          Filters
+          <span className="ml-1 font-normal text-indigo-400">
+            ({isFormSource ? 'filter_param=value' : '?param=value'})
+          </span>
+        </span>
+        <button
+          type="button"
+          onClick={addFilter}
+          className="text-xs text-indigo-600 hover:text-indigo-800 font-medium px-2 py-0.5 rounded border border-indigo-300 hover:bg-indigo-50"
+        >
+          + Add Filter
+        </button>
+      </div>
+
+      {filters.length === 0 && (
+        <p className="text-xs text-gray-400 italic">No filters — dropdown shows all records.</p>
+      )}
+
+      {filters.map((f, idx) => (
+        <div key={idx} className="flex flex-wrap gap-2 items-start p-2 bg-white rounded border border-indigo-200">
+          {/* Param name */}
+          <div className="flex-1 min-w-[100px]">
+            <label className="block text-[10px] font-medium text-gray-500 mb-0.5">
+              {isFormSource ? 'Field Key' : 'Query Param'}
+            </label>
+            <input
+              type="text"
+              className="form-input font-mono text-xs py-1"
+              placeholder={isFormSource ? 'status' : 'status'}
+              value={f.param}
+              onChange={e => updateFilter(idx, { param: e.target.value })}
+            />
+          </div>
+
+          {/* Value type toggle */}
+          <div>
+            <label className="block text-[10px] font-medium text-gray-500 mb-0.5">Type</label>
+            <div className="flex gap-0.5 bg-indigo-100 rounded p-0.5">
+              {(['static', 'dynamic'] as const).map(vt => (
+                <button
+                  key={vt}
+                  type="button"
+                  onClick={() => updateFilter(idx, { value_type: vt })}
+                  className={`px-2 py-0.5 text-xs rounded transition-colors ${
+                    f.value_type === vt
+                      ? 'bg-white text-indigo-700 shadow-sm font-medium'
+                      : 'text-indigo-500 hover:text-indigo-700'
+                  }`}
+                >
+                  {vt === 'static' ? 'Static' : 'Dynamic'}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Value */}
+          <div className="flex-1 min-w-[120px]">
+            <label className="block text-[10px] font-medium text-gray-500 mb-0.5">
+              {f.value_type === 'static' ? 'Value' : 'From Field'}
+            </label>
+            {f.value_type === 'static' ? (
+              <input
+                type="text"
+                className="form-input text-xs py-1"
+                placeholder="e.g. in_stock"
+                value={f.static_value ?? ''}
+                onChange={e => updateFilter(idx, { static_value: e.target.value })}
+              />
+            ) : (
+              <select
+                className="form-input text-xs py-1"
+                value={f.field_key ?? ''}
+                onChange={e => updateFilter(idx, { field_key: e.target.value })}
+              >
+                <option value="">— select field —</option>
+                {otherFields.map(of => (
+                  <option key={of.id} value={of.key}>{of.label} ({of.key})</option>
+                ))}
+              </select>
+            )}
+          </div>
+
+          {/* Remove */}
+          <button
+            type="button"
+            onClick={() => removeFilter(idx)}
+            className="mt-4 text-red-400 hover:text-red-600 text-lg leading-none"
+          >
+            ×
+          </button>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 // ── Field Lookup Config ──────────────────────────────────────────────────────
 
 interface FieldLookupConfigProps {
@@ -347,6 +832,103 @@ function FieldLookupConfig({ field, allFields, onUpdate }: FieldLookupConfigProp
             ))}
           </select>
           <p className="text-xs text-gray-400 mt-0.5">This field&apos;s value from the source record will be stored</p>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Edit With New Config ─────────────────────────────────────────────────────
+
+function EditWithNewConfig({ field, allFields, onUpdate }: {
+  field: BuilderField;
+  allFields: BuilderField[];
+  onUpdate: (patch: Partial<BuilderField>) => void;
+}) {
+  const rules: EditWithNewRule[] = (field.ewn_update_rules ?? []) as EditWithNewRule[];
+  const siblingFields = allFields.filter(f => f.id !== field.id && f.key);
+
+  const updateRule = (idx: number, patch: Partial<EditWithNewRule>) => {
+    onUpdate({ ewn_update_rules: rules.map((r, i) => i === idx ? { ...r, ...patch } : r) });
+  };
+  const addRule = () => onUpdate({ ewn_update_rules: [...rules, { field_key: '', value: '' }] });
+  const removeRule = (idx: number) => onUpdate({ ewn_update_rules: rules.filter((_, i) => i !== idx) });
+
+  return (
+    <div className="space-y-3">
+      {/* Reference Key */}
+      <div>
+        <label className="form-label">Reference Key</label>
+        <select
+          className="form-input"
+          value={field.reference_key ?? ''}
+          onChange={e => onUpdate({ reference_key: e.target.value })}
+        >
+          <option value="">— select a field —</option>
+          {siblingFields.map(f => (
+            <option key={f.id} value={f.key}>{f.label} ({f.key})</option>
+          ))}
+        </select>
+        <p className="text-xs text-gray-400 mt-0.5">
+          This field&apos;s value is locked (read-only) when opening a record via &quot;Edit With New&quot;
+        </p>
+      </div>
+
+      {/* Update on save toggle */}
+      <label className="flex items-center gap-2 cursor-pointer">
+        <input
+          type="checkbox"
+          className="form-checkbox"
+          checked={field.update_on_save ?? false}
+          onChange={e => onUpdate({ update_on_save: e.target.checked })}
+        />
+        <span className="text-sm font-medium text-gray-700">Update Records on Save</span>
+      </label>
+
+      {field.update_on_save && (
+        <div className="space-y-2 pl-1">
+          <p className="text-xs font-medium text-gray-600">
+            Update Rules — applied to the old record (matched by reference key)
+          </p>
+          {rules.length === 0 && (
+            <p className="text-xs text-gray-400 italic">No rules yet.</p>
+          )}
+          {rules.map((rule, idx) => (
+            <div key={idx} className="flex gap-2 items-start bg-white border border-teal-200 rounded-lg p-2">
+              <div className="flex-1">
+                <label className="block text-xs text-gray-500 mb-0.5">Field Key</label>
+                <input
+                  type="text"
+                  className="form-input text-xs font-mono"
+                  placeholder="e.g. status"
+                  value={rule.field_key}
+                  onChange={e => updateRule(idx, { field_key: e.target.value })}
+                />
+              </div>
+              <div className="flex-1">
+                <label className="block text-xs text-gray-500 mb-0.5">Set Value</label>
+                <input
+                  type="text"
+                  className="form-input text-xs"
+                  placeholder='e.g. cancelled'
+                  value={rule.value}
+                  onChange={e => updateRule(idx, { value: e.target.value })}
+                />
+              </div>
+              <button
+                type="button"
+                onClick={() => removeRule(idx)}
+                className="mt-5 text-red-400 hover:text-red-600 text-sm px-1 shrink-0"
+              >✕</button>
+            </div>
+          ))}
+          <button
+            type="button"
+            onClick={addRule}
+            className="text-xs text-teal-600 hover:text-teal-800 font-medium border border-teal-300 rounded px-3 py-1 hover:bg-teal-50 transition-colors"
+          >
+            + Add Rule
+          </button>
         </div>
       )}
     </div>
@@ -643,6 +1225,30 @@ function FieldSettingsPanel({ field, allFields, onUpdate, generateKey, isSubFiel
               )}
             </div>
           )}
+
+          {/* Extra Filters — available for both api_select and dependent_select */}
+          <ApiFiltersConfig
+            field={field}
+            allFields={allFields}
+            onUpdate={onUpdate}
+          />
+        </div>
+      )}
+
+      {/* Currency Symbol */}
+      {field.type === 'currency' && (
+        <div className="col-span-2">
+          <label className="block text-xs font-medium text-gray-600 mb-1">
+            Currency Symbol <span className="text-gray-400 font-normal">(optional — e.g. $, €, ₹, £)</span>
+          </label>
+          <input
+            type="text"
+            className="form-input text-sm w-32"
+            value={field.currency_symbol ?? ''}
+            onChange={e => onUpdate({ currency_symbol: e.target.value })}
+            placeholder="Empty = none"
+            maxLength={8}
+          />
         </div>
       )}
 
@@ -926,6 +1532,16 @@ function FieldSettingsPanel({ field, allFields, onUpdate, generateKey, isSubFiel
         </div>
       )}
 
+      {/* Edit With New config */}
+      {field.type === 'edit_with_new' && (
+        <div className="col-span-2 space-y-3 bg-teal-50 rounded-lg p-3 border border-teal-100">
+          <p className="text-xs font-semibold text-teal-700 uppercase tracking-wide flex items-center gap-1.5">
+            <CopyPlus size={12} /> Edit With New
+          </p>
+          <EditWithNewConfig field={field} allFields={allFields} onUpdate={onUpdate} />
+        </div>
+      )}
+
       {/* Sub Form columns builder — only in top-level fields, not sub-fields */}
       {!isSubField && field.type === 'sub_form' && (
         <div className="col-span-2 space-y-3 bg-violet-50 rounded-lg p-3 border border-violet-100">
@@ -937,6 +1553,14 @@ function FieldSettingsPanel({ field, allFields, onUpdate, generateKey, isSubFiel
             onChange={subFields => onUpdate({ subFormBuilderFields: subFields })}
             onAddToParentForm={onAddPeerField}
           />
+        </div>
+      )}
+
+      {/* Sub-Form Update Keys — only for top-level sub_form fields */}
+      {!isSubField && field.type === 'sub_form' && (
+        <div className="col-span-2 space-y-3 bg-orange-50 rounded-lg p-3 border border-orange-100">
+          <p className="text-xs font-semibold text-orange-700 uppercase tracking-wide">Update Records on Save</p>
+          <SubFormUpdateConfig field={field} onUpdate={onUpdate} />
         </div>
       )}
 
@@ -1164,7 +1788,7 @@ function SubFormBuilder({ fields: subFields, allParentFields, onChange, parentSu
         response_path: 'data', display_key: 'name', value_key: 'id',
         table_value_key: '', api_auth_type: 'none' as const,
         api_auth_token: '', api_auth_username: '', api_auth_password: '',
-        api_body: '', searchable_dropdown: false,
+        api_body: '', searchable_dropdown: false, api_filters: [] as ApiFilter[],
       } : {}),
       ...(type === 'date' || type === 'datetime' || type === 'time' ? {
         date_format: 'DD/MM/YYYY' as const, time_format: '24h' as const,
@@ -1237,8 +1861,8 @@ function SubFormBuilder({ fields: subFields, allParentFields, onChange, parentSu
     })());
   };
 
-  // Exclude sub_form from sub-form picker (no nesting)
-  const availableTypes = FIELD_TYPES.filter(t => t.type !== 'sub_form');
+  // Exclude sub_form and edit_with_new from sub-form picker (no nesting)
+  const availableTypes = FIELD_TYPES.filter(t => t.type !== 'sub_form' && t.type !== 'edit_with_new');
 
   // allParentFields is accepted but not used directly here; sub-field siblings are subFields
   void allParentFields;
@@ -1371,6 +1995,7 @@ export default function FormBuilder({ onSuccess, initialConfig }: FormBuilderPro
         api_auth_token: '', api_auth_username: '', api_auth_password: '',
         api_body: '',
         searchable_dropdown: false,
+        api_filters: [] as ApiFilter[],
       } : {}),
       // Date / datetime / time — format + timezone + default now
       ...(type === 'date' || type === 'datetime' || type === 'time' ? {
@@ -1395,6 +2020,7 @@ export default function FormBuilder({ onSuccess, initialConfig }: FormBuilderPro
         condition_field: '',
         conditions: [],
         condition_default_formula: '',
+        ...(type === 'currency' ? { currency_symbol: '' } : {}),
       } : {}),
       // Textarea defaults
       ...(type === 'textarea' ? {
@@ -1412,6 +2038,14 @@ export default function FormBuilder({ onSuccess, initialConfig }: FormBuilderPro
       // Sub form defaults
       ...(type === 'sub_form' ? {
         subFormBuilderFields: [],
+        update_enabled: false,
+        update_targets: [],
+      } : {}),
+      // Edit With New defaults
+      ...(type === 'edit_with_new' ? {
+        reference_key: '',
+        update_on_save: false,
+        ewn_update_rules: [] as EditWithNewRule[],
       } : {}),
     };
     setFields(prev => [...prev, newField]);
@@ -1476,6 +2110,8 @@ export default function FormBuilder({ onSuccess, initialConfig }: FormBuilderPro
       // Dependent select
       depends_on:        f.depends_on,
       filter_key:        f.filter_key,
+      // Extra filters (api_select + dependent_select)
+      api_filters:       f.api_filters ?? [],
       // Searchable dropdown / value source
       searchable_dropdown: f.searchable_dropdown,
       api_source:        f.api_source,
@@ -1495,6 +2131,8 @@ export default function FormBuilder({ onSuccess, initialConfig }: FormBuilderPro
       edit_on_list:      f.edit_on_list ?? false,
       // Combined text field
       combined_template: f.combined_template ?? '',
+      // Currency symbol
+      currency_symbol: f.currency_symbol ?? '',
       // Hidden flag
       hidden: f.hidden ?? false,
       // Sub form fields
@@ -1544,6 +2182,7 @@ export default function FormBuilder({ onSuccess, initialConfig }: FormBuilderPro
         condition_field:   sf.condition_field   ?? '',
         conditions:        sf.conditions        ?? [],
         condition_default_formula: sf.condition_default_formula ?? '',
+        api_filters:       sf.api_filters       ?? [],
         sub_form_fields: [],  // no deeper nesting
       })),
       // Field lookup (text field only)
@@ -1553,6 +2192,13 @@ export default function FormBuilder({ onSuccess, initialConfig }: FormBuilderPro
       condition_field:   f.condition_field   ?? '',
       conditions:        f.conditions        ?? [],
       condition_default_formula: f.condition_default_formula ?? '',
+      // Sub-form update keys
+      update_enabled:  f.update_enabled  ?? false,
+      update_targets:  f.update_targets  ?? [],
+      // Edit-with-new config
+      reference_key:     f.reference_key    ?? '',
+      update_on_save:    f.update_on_save   ?? false,
+      ewn_update_rules:  f.ewn_update_rules ?? [],
     }));
     return formFields;
   };

@@ -16,7 +16,7 @@ import { toast } from 'react-toastify';
 import {
   Search, ChevronUp, ChevronDown, ChevronLeft, ChevronRight,
   Edit2, Trash2, Eye, Download, RefreshCw, Upload, Filter,
-  CheckSquare, Square, X, Pencil, Columns, Check,
+  CheckSquare, Square, X, Pencil, Columns, Check, CopyPlus,
 } from 'lucide-react';
 import { useTenantStore } from '@/store/tenant';
 import { formatFieldValue } from '@/lib/datetime';
@@ -24,10 +24,11 @@ import { formatFieldValue } from '@/lib/datetime';
 interface DynamicListProps {
   pageName: string;
   onEditRecord?: (record: Record<string, unknown>) => void;
+  onEditWithNew?: (record: Record<string, unknown>) => void;
   activeRecordId?: string | null;
 }
 
-export default function DynamicList({ pageName, onEditRecord, activeRecordId }: DynamicListProps) {
+export default function DynamicList({ pageName, onEditRecord, onEditWithNew, activeRecordId }: DynamicListProps) {
   const queryClient = useQueryClient();
   const timezone = useTenantStore(s => s.company?.settings?.timezone ?? 'UTC');
 
@@ -205,6 +206,12 @@ export default function DynamicList({ pageName, onEditRecord, activeRecordId }: 
     [sourceFields]
   );
   const hasEditOnList = editOnListKeys.size > 0;
+
+  // Detect edit_with_new field — action icon only shown when this field is configured
+  const editWithNewField = React.useMemo(
+    () => sourceFields.find(f => f.type === 'edit_with_new'),
+    [sourceFields]
+  );
 
   // ── Sorting ────────────────────────────────────────────────
   const handleSort = (field: string) => {
@@ -637,7 +644,7 @@ export default function DynamicList({ pageName, onEditRecord, activeRecordId }: 
                   );
                 })}
 
-                {((config?.actions?.length ?? 0) > 0 || hasEditOnList) && (
+                {((config?.actions?.length ?? 0) > 0 || hasEditOnList || Boolean(editWithNewField)) && (
                   <th className="table-header text-right">Actions</th>
                 )}
               </tr>
@@ -671,7 +678,7 @@ export default function DynamicList({ pageName, onEditRecord, activeRecordId }: 
                   const isActive  = activeRecordId === id;
                   const isDirty   = id in inlineEdits;
                   const isSaving  = savingRows.has(id);
-                  const showActionsCol = (config?.actions?.length ?? 0) > 0 || hasEditOnList;
+                  const showActionsCol = (config?.actions?.length ?? 0) > 0 || hasEditOnList || Boolean(editWithNewField);
 
                   const handleInlineChange = (col: string, val: unknown) => {
                     setInlineEdits(prev => ({
@@ -800,6 +807,15 @@ export default function DynamicList({ pageName, onEditRecord, activeRecordId }: 
                                 <Trash2 size={14} />
                               </button>
                             )}
+                            {editWithNewField && (
+                              <button
+                                onClick={() => onEditWithNew?.(record)}
+                                className="p-1.5 text-gray-400 hover:text-teal-600 rounded"
+                                title="Edit With New"
+                              >
+                                <CopyPlus size={14} />
+                              </button>
+                            )}
                           </div>
                         </td>
                       )}
@@ -828,7 +844,7 @@ export default function DynamicList({ pageName, onEditRecord, activeRecordId }: 
                       ) : null}
                     </td>
                   ))}
-                  {((config?.actions?.length ?? 0) > 0 || hasEditOnList) && <td />}
+                  {((config?.actions?.length ?? 0) > 0 || hasEditOnList || Boolean(editWithNewField)) && <td />}
                 </tr>
               </tfoot>
             )}

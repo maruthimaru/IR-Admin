@@ -7,6 +7,37 @@ export interface ConditionRule {
   formula: string;
 }
 
+export interface ApiFilter {
+  param: string;           // field key (form source) or query param name (URL source)
+  value_type: 'static' | 'dynamic';
+  static_value?: string;
+  field_key?: string;      // other field in the same form (dynamic mode)
+}
+
+export interface SubFormUpdateTarget {
+  target_form: string;
+  lookup_key: string;
+  rules: SubFormUpdateRule[];
+  delete_rules?: SubFormUpdateRule[];
+}
+
+export interface SubFormUpdateCondition {
+  when: string;   // value of condition_field that triggers this mapping
+  value: string;  // static value to set in the target record
+}
+
+export interface SubFormUpdateRule {
+  to_key: string;       // field key in the target record (field to write)
+  operation: 'set' | 'increment' | 'decrement' | 'multiply';
+  // value source
+  value_type?: 'field' | 'static' | 'conditional';  // default: 'field'
+  from_key?: string;           // used when value_type = 'field'
+  static_value?: string;       // used when value_type = 'static'
+  condition_field?: string;    // sub-form field to check (value_type = 'conditional')
+  condition_map?: SubFormUpdateCondition[];
+  default_value?: string;      // fallback when no condition matches
+}
+
 export interface User {
   id: number;
   email: string;
@@ -47,7 +78,12 @@ export type FieldType =
   | 'select' | 'multi_select' | 'checkbox' | 'radio' | 'textarea'
   | 'file' | 'image' | 'currency' | 'percentage' | 'url' | 'color'
   | 'rating' | 'switch' | 'hidden' | 'formula' | 'relation'
-  | 'api_select' | 'dependent_select' | 'uid' | 'sub_form';
+  | 'api_select' | 'dependent_select' | 'uid' | 'sub_form' | 'edit_with_new';
+
+export interface EditWithNewRule {
+  field_key: string;
+  value: string;
+}
 
 export interface FieldOption {
   label: string;
@@ -95,6 +131,8 @@ export interface FormField {
   // Dependent select
   depends_on?: string;          // key of the parent field
   filter_key?: string;          // query-param name to pass parent value, e.g. "country_id"
+  // Additional filter params (api_select + dependent_select)
+  api_filters?: ApiFilter[];
   // Searchable combobox (api_select / dependent_select)
   searchable_dropdown?: boolean;
   // Data source for api_select / dependent_select
@@ -105,6 +143,8 @@ export interface FormField {
   formula?: string;             // e.g. "price * quantity" using other field keys
   // API select — label stored alongside the value for list display
   table_value_key?: string;
+  // Currency symbol
+  currency_symbol?: string;    // e.g. '$', '€', '₹', '£'
   // Date / datetime / time — display format, timezone and default
   date_format?: string;        // e.g. 'DD/MM/YYYY'
   time_format?: '24h' | '12h';
@@ -127,6 +167,13 @@ export interface FormField {
   // Field lookup — auto-populate from a form-source dropdown
   lookup_field_key?: string;
   lookup_source_field?: string;
+  // Sub-form record update on save (sub_form type only)
+  update_enabled?: boolean;
+  update_targets?: SubFormUpdateTarget[];  // one entry per target collection
+  // Edit-with-new field config
+  reference_key?: string;
+  update_on_save?: boolean;
+  ewn_update_rules?: EditWithNewRule[];
 }
 
 // ── Form Configuration ──────────────────────────────────────
