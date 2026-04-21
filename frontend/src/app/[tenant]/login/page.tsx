@@ -5,7 +5,7 @@ import { useParams, useRouter } from 'next/navigation';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
-import { authAPI, companiesAPI } from '@/lib/api';
+import { authAPI, companiesAPI, permissionsAPI } from '@/lib/api';
 import { useAuthStore } from '@/store/auth';
 import { useTenantStore } from '@/store/tenant';
 import { Eye, EyeOff, Building2, Loader2 } from 'lucide-react';
@@ -21,7 +21,7 @@ export default function TenantLoginPage() {
   const router   = useRouter();
   const subdomain = params.tenant as string;
 
-  const { login: storeLogin, isAuthenticated, user } = useAuthStore();
+  const { login: storeLogin, isAuthenticated, user, setPermissions } = useAuthStore();
   const { setCompany, company: storedCompany }        = useTenantStore();
 
   const [showPassword, setShowPassword] = useState(false);
@@ -78,6 +78,12 @@ export default function TenantLoginPage() {
 
       storeLogin({ access, refresh, user });
       setCompany(company);
+
+      // Load permissions for end users
+      try {
+        const permRes = await permissionsAPI.myPermissions();
+        setPermissions(permRes.data);
+      } catch { /* non-fatal */ }
 
       router.push(`/${subdomain}/dashboard`);
     } catch (err: unknown) {

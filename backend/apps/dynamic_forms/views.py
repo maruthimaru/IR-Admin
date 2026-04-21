@@ -19,6 +19,41 @@ from apps.core.middleware import get_tenant_db_name
 
 logger = logging.getLogger(__name__)
 
+
+def _check_form_permission(request, db, form_name: str, action: str) -> bool:
+    """
+    Returns True if the current user may perform `action` on `form_name`.
+    super_admin / company_admin / developer → always True.
+    end_user → checks their tenant role's form-level permissions.
+    action: 'view' | 'add' | 'edit' | 'delete' | 'export' | 'import'
+    """
+    from bson import ObjectId as _ObjId
+    role = getattr(request.user, 'role', 'end_user')
+    if role in ('super_admin', 'company_admin', 'developer'):
+        return True
+
+    try:
+        from apps.utils.mongodb import get_main_db as _main_db
+        user_doc = _main_db()['users'].find_one({'_id': _ObjId(request.user.id)})
+    except Exception:
+        return False
+
+    tenant_role_id = (user_doc or {}).get('tenant_role_id')
+    if not tenant_role_id:
+        return False
+
+    try:
+        tenant_role = db['roles'].find_one({'_id': _ObjId(tenant_role_id)})
+    except Exception:
+        return False
+
+    if not tenant_role or not tenant_role.get('is_active', True):
+        return False
+
+    perms = tenant_role.get('permissions', {})
+    return bool(perms.get('forms', {}).get(form_name, {}).get(action, False))
+
+
 ALLOWED_FIELD_TYPES = [
     'text', 'number', 'email', 'phone', 'date', 'datetime', 'time',
     'select', 'multi_select', 'checkbox', 'radio', 'textarea',
@@ -801,7 +836,11 @@ def form_records(request, form_name):
 
     collection_name = f"records_{form_name}"
     if request.method == 'GET':
+        if not _check_form_permission(request, db, form_name, 'view'):
+            return Response({'error': 'Access denied: view permission required'}, status=403)
         return _list_records(request, db, collection_name, form_config)
+    if not _check_form_permission(request, db, form_name, 'add'):
+        return Response({'error': 'Access denied: add permission required'}, status=403)
     return _create_record(request, db, collection_name, form_config)
 
 
@@ -969,9 +1008,13 @@ def record_detail(request, form_name, record_id):
             record[k] = v.isoformat()
 
     if request.method == 'GET':
+        if not _check_form_permission(request, db, form_name, 'view'):
+            return Response({'error': 'Access denied: view permission required'}, status=403)
         return Response(record)
 
     elif request.method == 'PUT':
+        if not _check_form_permission(request, db, form_name, 'edit'):
+            return Response({'error': 'Access denied: edit permission required'}, status=403)
         form_config = db['dynamic_forms'].find_one({'form_name': form_name})
         fields = form_config.get('fields', []) if form_config else []
         update_data, errors = {}, {}
@@ -1047,6 +1090,8 @@ def record_detail(request, form_name, record_id):
         return Response({'message': 'Record updated successfully'})
 
     elif request.method == 'DELETE':
+        if not _check_form_permission(request, db, form_name, 'delete'):
+            return Response({'error': 'Access denied: delete permission required'}, status=403)
         now = datetime.datetime.utcnow()
         db[collection_name].update_one(
             {'_id': ObjectId(record_id)},
@@ -1089,6 +1134,9 @@ def export_records(request, form_name):
     if not form_config:
         return Response({'error': 'Form not found'}, status=404)
 
+    if not _check_form_permission(request, db, form_name, 'export'):
+        return Response({'error': 'Access denied: export permission required'}, status=403)
+
     fields          = form_config.get('fields', [])
     field_keys      = [f['key'] for f in fields]
     field_labels    = [f['label'] for f in fields]
@@ -1129,6 +1177,9 @@ def import_records(request, form_name):
     form_config = db['dynamic_forms'].find_one({'form_name': form_name, 'type': 'input'})
     if not form_config:
         return Response({'error': 'Form not found'}, status=404)
+
+    if not _check_form_permission(request, db, form_name, 'import'):
+        return Response({'error': 'Access denied: import permission required'}, status=403)
 
     csv_file = request.FILES.get('file')
     if not csv_file:
@@ -1428,17 +1479,20 @@ def report_configs(request):
 
     now = datetime.datetime.utcnow()
     report = {
-        'form_name':       form_name,
-        'display_name':    data.get('display_name', form_name.replace('_', ' ').title()),
-        'category':        data.get('category', ''),
-        'type':            'report',
-        'base_collection': data.get('base_collection', ''),
-        'joins':           data.get('joins', []),
-        'columns':         data.get('columns', []),
-        'created_by':      str(request.user.id),
-        'created_at':      now,
-        'updated_at':      now,
-        'is_active':       True,
+        'form_name':        form_name,
+        'display_name':     data.get('display_name', form_name.replace('_', ' ').title()),
+        'category':         data.get('category', ''),
+        'type':             'report',
+        'base_collection':  data.get('base_collection', ''),
+        'joins':            data.get('joins', []),
+        'columns':          data.get('columns', []),
+        'grouping_enabled':  bool(data.get('grouping_enabled', False)),
+        'invoice_enabled':   bool(data.get('invoice_enabled', False)),
+        'invoice_config':    data.get('invoice_config', {}),
+        'created_by':        str(request.user.id),
+        'created_at':       now,
+        'updated_at':       now,
+        'is_active':        True,
     }
     result = db['dynamic_forms'].insert_one(report)
     report['_id'] = str(result.inserted_id)
@@ -1466,7 +1520,7 @@ def report_config_detail(request, report_name):
     if request.method == 'PUT':
         data   = request.data
         update = {'updated_at': datetime.datetime.utcnow()}
-        for field in ('display_name', 'category', 'base_collection', 'joins', 'columns'):
+        for field in ('display_name', 'category', 'base_collection', 'joins', 'columns', 'grouping_enabled', 'invoice_enabled', 'invoice_config'):
             if field in data:
                 update[field] = data[field]
         db['dynamic_forms'].update_one({'form_name': report_name}, {'$set': update})
@@ -1576,6 +1630,84 @@ def report_data(request, report_name):
             base_pipeline.append({'$match': {'$or': [
                 {fk: {'$regex': search, '$options': 'i'}} for fk in text_fields
             ]}})
+
+    # ── Group & aggregate (optional) ──────────────────────────
+    grouping_enabled = config.get('grouping_enabled', False)
+    group_by_cols    = [c for c in columns if c.get('group_by')]
+    agg_cols         = [c for c in columns if (c.get('aggregation') or 'none') != 'none']
+
+    def _key_alias(key: str) -> str:
+        return key.replace('.', '__')
+
+    def _set_dotted(record: dict, key: str, value):
+        parts = key.split('.')
+        d = record
+        for p in parts[:-1]:
+            d = d.setdefault(p, {})
+        d[parts[-1]] = value
+
+    if grouping_enabled and (group_by_cols or agg_cols):
+        group_id = {_key_alias(c['key']): f'${c["key"]}' for c in group_by_cols} or None
+        group_doc: dict = {'_id': group_id}
+        for col in agg_cols:
+            alias = _key_alias(col['key'])
+            op    = col.get('aggregation', 'sum')
+            if op == 'count':
+                group_doc[alias] = {'$sum': 1}
+            else:
+                group_doc[alias] = {f'${op}': f'${col["key"]}'}
+
+        group_pipeline = base_pipeline + [{'$group': group_doc}]
+
+        # Count
+        count_result = list(db[base_col].aggregate(group_pipeline + [{'$count': 'n'}]))
+        total = count_result[0]['n'] if count_result else 0
+
+        # Determine sort field (use first group_by key alias, or first agg alias)
+        if group_by_cols:
+            g_sort = _key_alias(group_by_cols[0]['key'])
+            sort_stage = {'$sort': {f'_id.{g_sort}': sort_order}} if isinstance(group_id, dict) else {'$sort': {'_id': sort_order}}
+        else:
+            sort_stage = {'$sort': {_key_alias(agg_cols[0]['key']): sort_order}}
+
+        raw_records = list(db[base_col].aggregate(
+            group_pipeline + [
+                sort_stage,
+                {'$skip': (page - 1) * page_size},
+                {'$limit': page_size},
+            ]
+        ))
+
+        records = []
+        for raw in raw_records:
+            r: dict = {}
+            id_val = raw.get('_id')
+            for col in group_by_cols:
+                alias = _key_alias(col['key'])
+                val   = id_val.get(alias) if isinstance(id_val, dict) else id_val
+                _set_dotted(r, col['key'], val)
+            for col in agg_cols:
+                alias = _key_alias(col['key'])
+                raw_val = raw.get(alias)
+                if isinstance(raw_val, float) and raw_val == int(raw_val):
+                    raw_val = int(raw_val)
+                _set_dotted(r, col['key'], raw_val)
+            _serialize_doc(r)
+            records.append(r)
+
+        return Response({
+            'config': {
+                '_id':             str(config['_id']),
+                'form_name':       config['form_name'],
+                'display_name':    config.get('display_name', ''),
+                'columns':         columns,
+                'grouping_enabled': True,
+            },
+            'results':   records,
+            'total':     total,
+            'page':      page,
+            'page_size': page_size,
+        })
 
     # ── Count total before pagination ──────────────────────────
     count_result = list(db[base_col].aggregate(base_pipeline + [{'$count': 'n'}]))

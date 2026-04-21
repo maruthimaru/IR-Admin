@@ -46,11 +46,79 @@ export interface User {
   full_name: string;
   role: UserRole;
   company_id?: string;
+  tenant_role_id?: string;
   phone?: string;
   avatar?: string;
   is_active: boolean;
   date_joined: string;
   last_login?: string;
+}
+
+// ── RBAC Types ───────────────────────────────────────────────
+
+export interface FormPermissions {
+  view: boolean;
+  add: boolean;
+  edit: boolean;
+  delete: boolean;
+  export: boolean;
+  import: boolean;
+}
+
+export interface SectionActions {
+  view: boolean;
+  add: boolean;
+  edit: boolean;
+  delete: boolean;
+}
+
+export interface IntegrationPermissions {
+  view: boolean;
+  view_payment: boolean;
+  view_sms: boolean;
+  view_email: boolean;
+  enable: boolean;
+  save: boolean;
+}
+
+export interface RolePermissions {
+  dashboard?: boolean;
+  pages?: boolean;
+  reports?: boolean | SectionActions;
+  settings?: boolean;
+  integration?: boolean | IntegrationPermissions;
+  roles?: boolean | SectionActions;
+  forms?: Record<string, FormPermissions>;
+}
+
+export interface TenantRole {
+  _id: string;
+  name: string;
+  description?: string;
+  permissions: RolePermissions;
+  is_active: boolean;
+  created_at: string;
+  user_count?: number;
+}
+
+export interface TenantUser {
+  id: string;
+  email: string;
+  first_name: string;
+  last_name: string;
+  full_name: string;
+  role: UserRole;
+  tenant_role_id?: string;
+  phone?: string;
+  is_active: boolean;
+  date_joined?: string;
+  last_login?: string;
+}
+
+export interface PermissionsResponse {
+  full_access: boolean;
+  role_name?: string;
+  permissions: RolePermissions;
 }
 
 export interface Company {
@@ -283,6 +351,22 @@ export interface ReportColumn {
   key: string;    // dot-notation key: "field" or "alias.field"
   label: string;  // display label
   source: string; // "base" | join alias
+  group_by?: boolean;
+  aggregation?: 'none' | 'sum' | 'avg' | 'min' | 'max' | 'count';
+}
+
+export interface InvoiceHeaderField {
+  label: string;
+  value: string;  // free text or {{column_key}} template
+}
+
+export interface InvoiceConfig {
+  title: string;
+  header_left_lines: string[];
+  header_right_fields: InvoiceHeaderField[];
+  body_columns: string[];
+  footer_notes: string;
+  footer_fields: InvoiceHeaderField[];
 }
 
 export interface ReportConfig {
@@ -294,6 +378,9 @@ export interface ReportConfig {
   base_collection: string;
   joins: ReportJoin[];
   columns: ReportColumn[];
+  grouping_enabled?: boolean;
+  invoice_enabled?: boolean;
+  invoice_config?: InvoiceConfig;
   created_at: string;
   is_active: boolean;
 }
@@ -305,9 +392,11 @@ export interface AuthState {
   accessToken: string | null;
   refreshToken: string | null;
   isAuthenticated: boolean;
+  permissions?: PermissionsResponse | null;
   login: (tokens: AuthTokens) => void;
   logout: () => void;
   updateUser: (user: Partial<User>) => void;
+  setPermissions?: (p: PermissionsResponse) => void;
 }
 
 export interface TenantState {

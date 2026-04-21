@@ -7,11 +7,12 @@
 
 import React, { useState, useRef, useEffect } from 'react';
 import { useQuery, keepPreviousData } from '@tanstack/react-query';
+import { useParams, useRouter } from 'next/navigation';
 import { reportsAPI } from '@/lib/api';
 import { ReportColumn } from '@/types';
 import {
   Search, ChevronUp, ChevronDown, ChevronLeft, ChevronRight,
-  RefreshCw, Download, Columns,
+  RefreshCw, Download, Columns, FileText,
 } from 'lucide-react';
 import { format } from 'date-fns';
 
@@ -50,6 +51,10 @@ function formatCell(value: unknown): React.ReactNode {
 }
 
 export default function ReportList({ reportName }: ReportListProps) {
+  const params    = useParams();
+  const router    = useRouter();
+  const subdomain = params.tenant as string;
+
   const [page,      setPage]      = useState(1);
   const [pageSize,  setPageSize]  = useState(20);
   const [search,    setSearch]    = useState('');
@@ -70,7 +75,7 @@ export default function ReportList({ reportName }: ReportListProps) {
     placeholderData: keepPreviousData,
   });
 
-  const config:   { display_name?: string; columns?: ReportColumn[] } = data?.config ?? {};
+  const config:   { display_name?: string; columns?: ReportColumn[]; invoice_enabled?: boolean } = data?.config ?? {};
   const records:  Record<string, unknown>[] = data?.results ?? [];
   const total:    number = data?.total ?? 0;
   const allCols:  ReportColumn[] = config.columns ?? [];
@@ -92,6 +97,13 @@ export default function ReportList({ reportName }: ReportListProps) {
     if (colsOpen) document.addEventListener('mousedown', handler);
     return () => document.removeEventListener('mousedown', handler);
   }, [colsOpen]);
+
+  const invoiceEnabled = Boolean(config.invoice_enabled);
+
+  const handleInvoiceRow = (record: Record<string, unknown>) => {
+    sessionStorage.setItem(`invoice_row_${reportName}`, JSON.stringify(record));
+    router.push(`/${subdomain}/runtime/report/${reportName}/invoice?single=true`);
+  };
 
   const displayCols = allCols.filter(c => !visibleCols || visibleCols.has(c.key));
 
@@ -215,7 +227,6 @@ export default function ReportList({ reportName }: ReportListProps) {
             <thead className="bg-gray-50 border-b border-gray-200">
               <tr>
                 {displayCols.map(col => {
-                  // Only base fields (no dot) are sortable for now
                   const sortable = !col.key.includes('.');
                   const isActive = sortBy === col.key;
                   return (
@@ -244,6 +255,9 @@ export default function ReportList({ reportName }: ReportListProps) {
                     </th>
                   );
                 })}
+                {invoiceEnabled && (
+                  <th className="table-header w-24 text-center">Invoice</th>
+                )}
               </tr>
             </thead>
 
@@ -256,6 +270,7 @@ export default function ReportList({ reportName }: ReportListProps) {
                         <div className="h-4 bg-gray-100 rounded animate-pulse" />
                       </td>
                     ))}
+                    {invoiceEnabled && <td className="table-cell" />}
                   </tr>
                 ))
               ) : records.length === 0 ? (
@@ -272,6 +287,16 @@ export default function ReportList({ reportName }: ReportListProps) {
                         {formatCell(getNestedValue(record, col.key))}
                       </td>
                     ))}
+                    {invoiceEnabled && (
+                      <td className="table-cell text-center">
+                        <button
+                          onClick={() => handleInvoiceRow(record)}
+                          className="inline-flex items-center gap-1 px-2 py-1 text-xs rounded border border-indigo-200 text-indigo-600 bg-indigo-50 hover:bg-indigo-100 hover:border-indigo-300 transition-colors"
+                        >
+                          <FileText size={11} /> Invoice
+                        </button>
+                      </td>
+                    )}
                   </tr>
                 ))
               )}

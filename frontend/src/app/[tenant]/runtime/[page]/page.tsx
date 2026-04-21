@@ -11,11 +11,13 @@ import { useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { useQuery } from '@tanstack/react-query';
 import { formsAPI } from '@/lib/api';
+import { useAuthStore } from '@/store/auth';
 import TenantShell from '@/components/tenant/TenantShell';
 import DynamicList from '@/components/runtime/DynamicList';
 import DynamicForm from '@/components/runtime/DynamicForm';
-import { ArrowLeft, Plus, X, Loader2 } from 'lucide-react';
+import { ArrowLeft, Plus, X, Loader2, Lock } from 'lucide-react';
 import { InputFormConfig } from '@/types';
+import { usePermissions } from '@/hooks/usePermissions';
 
 export default function RuntimePage() {
   const params    = useParams();
@@ -27,6 +29,9 @@ export default function RuntimePage() {
   const inputFormName = pageName.endsWith('_list')
     ? pageName.slice(0, -5)
     : pageName;
+
+  const { formPerms } = usePermissions();
+  const fp = formPerms(inputFormName);
 
   const [panelOpen, setPanelOpen]       = useState(false);
   const [editRecord, setEditRecord]     = useState<Record<string, unknown> | null>(null);
@@ -86,6 +91,29 @@ export default function RuntimePage() {
     setPanelMode('create');
   };
 
+  // Block view if explicitly denied (fp.view is false only when permissions are loaded and deny)
+  const permissionsLoaded = useAuthStore(s => (s as { permissions?: unknown }).permissions !== undefined);
+  if (permissionsLoaded && !fp.view) {
+    return (
+      <TenantShell>
+        <div className="flex flex-col items-center justify-center h-full min-h-[60vh] gap-4 text-center px-6">
+          <div className="w-16 h-16 rounded-2xl bg-red-50 flex items-center justify-center">
+            <Lock size={28} className="text-red-400" />
+          </div>
+          <div>
+            <h2 className="text-xl font-semibold text-gray-900">Access Denied</h2>
+            <p className="text-sm text-gray-500 mt-1 max-w-xs">
+              You don&apos;t have permission to view this page. Contact your admin to request access.
+            </p>
+          </div>
+          <button onClick={() => router.push(`/${subdomain}/dashboard`)} className="btn-secondary text-sm mt-2">
+            Go to Dashboard
+          </button>
+        </div>
+      </TenantShell>
+    );
+  }
+
   return (
     <TenantShell>
       <div className="p-8 space-y-6 max-w-full">
@@ -100,7 +128,7 @@ export default function RuntimePage() {
             Forms
           </button>
 
-          {formConfig && (
+          {formConfig && fp.add && (
             <button
               onClick={openCreate}
               className="btn-primary flex items-center gap-2"

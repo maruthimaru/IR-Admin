@@ -226,4 +226,24 @@ export const integrationsAPI = {
     api.post('/integrations/settings/email/test/', toEmail ? { to_email: toEmail } : {}),
 };
 
+export const rolesAPI = {
+  list:   (params?: object) => api.get('/core/roles/', { params }),
+  create: (data: object)    => api.post('/core/roles/', data),
+  get:    (id: string)      => api.get(`/core/roles/${id}/`),
+  update: (id: string, data: object) => api.put(`/core/roles/${id}/`, data),
+  delete: (id: string)      => api.delete(`/core/roles/${id}/`),
+};
+
+export const tenantUsersAPI = {
+  list:   (params?: object) => api.get('/core/tenant-users/', { params }),
+  create: (data: object)    => api.post('/core/tenant-users/', data),
+  get:    (id: string)      => api.get(`/core/tenant-users/${id}/`),
+  update: (id: string, data: object) => api.put(`/core/tenant-users/${id}/`, data),
+  delete: (id: string)      => api.delete(`/core/tenant-users/${id}/`),
+};
+
+export const permissionsAPI = {
+  myPermissions: () => api.get('/core/my-permissions/'),
+};
+
 export default api;

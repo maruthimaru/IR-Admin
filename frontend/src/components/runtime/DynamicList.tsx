@@ -20,6 +20,7 @@ import {
 } from 'lucide-react';
 import { useTenantStore } from '@/store/tenant';
 import { formatFieldValue } from '@/lib/datetime';
+import { usePermissions } from '@/hooks/usePermissions';
 
 interface DynamicListProps {
   pageName: string;
@@ -163,6 +164,9 @@ export default function DynamicList({ pageName, onEditRecord, onEditWithNew, act
   const totalPages    = Math.ceil(total / pageSize);
   const sourceFields: FormField[] = (data?.page_config as { source_fields?: FormField[] })?.source_fields ?? [];
   const formRef       = config?.form_ref ?? '';
+
+  const { formPerms } = usePermissions();
+  const fp = formPerms(formRef);
 
   // Initialise visible columns once config loads; preserve user overrides on refetch
   useEffect(() => {
@@ -458,32 +462,36 @@ export default function DynamicList({ pageName, onEditRecord, onEditWithNew, act
           </button>
 
           {/* Export */}
-          <button
-            onClick={exportToCSV}
-            className="btn-secondary flex items-center gap-1.5 text-sm py-1.5"
-          >
-            <Download size={13} />
-            Export
-          </button>
-
-          {/* Import */}
-          <>
-            <input
-              ref={importRef}
-              type="file"
-              accept=".csv"
-              className="hidden"
-              onChange={handleImport}
-            />
+          {fp.export && (
             <button
-              onClick={() => importRef.current?.click()}
-              disabled={importMutation.isPending}
+              onClick={exportToCSV}
               className="btn-secondary flex items-center gap-1.5 text-sm py-1.5"
             >
-              <Upload size={13} />
-              {importMutation.isPending ? 'Importing...' : 'Import CSV'}
+              <Download size={13} />
+              Export
             </button>
-          </>
+          )}
+
+          {/* Import */}
+          {fp.import && (
+            <>
+              <input
+                ref={importRef}
+                type="file"
+                accept=".csv"
+                className="hidden"
+                onChange={handleImport}
+              />
+              <button
+                onClick={() => importRef.current?.click()}
+                disabled={importMutation.isPending}
+                className="btn-secondary flex items-center gap-1.5 text-sm py-1.5"
+              >
+                <Upload size={13} />
+                {importMutation.isPending ? 'Importing...' : 'Import CSV'}
+              </button>
+            </>
+          )}
         </div>
       </div>
 
@@ -780,12 +788,12 @@ export default function DynamicList({ pageName, onEditRecord, onEditWithNew, act
                                 </button>
                               </>
                             )}
-                            {config?.actions?.includes('view') && (
+                            {config?.actions?.includes('view') && fp.view && (
                               <button className="p-1.5 text-gray-400 hover:text-blue-600 rounded" title="View">
                                 <Eye size={14} />
                               </button>
                             )}
-                            {config?.actions?.includes('edit') && (
+                            {config?.actions?.includes('edit') && fp.edit && (
                               <button
                                 onClick={() => onEditRecord?.(record)}
                                 className="p-1.5 text-gray-400 hover:text-indigo-600 rounded"
@@ -794,7 +802,7 @@ export default function DynamicList({ pageName, onEditRecord, onEditWithNew, act
                                 <Edit2 size={14} />
                               </button>
                             )}
-                            {config?.actions?.includes('delete') && (
+                            {config?.actions?.includes('delete') && fp.delete && (
                               <button
                                 onClick={() => {
                                   if (confirm('Delete this record?')) {

@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import { jwtDecode } from 'jwt-decode';
-import { AuthState, AuthTokens, User } from '@/types';
+import { AuthState, AuthTokens, User, PermissionsResponse } from '@/types';
 
 interface JwtPayload {
   exp: number;
@@ -20,13 +20,19 @@ function isTokenAlive(token: string | null): boolean {
   }
 }
 
-export const useAuthStore = create<AuthState>()(
+interface ExtendedAuthState extends AuthState {
+  permissions: PermissionsResponse | null;
+  setPermissions: (p: PermissionsResponse) => void;
+}
+
+export const useAuthStore = create<ExtendedAuthState>()(
   persist(
     (set) => ({
       user: null,
       accessToken: null,
       refreshToken: null,
       isAuthenticated: false,
+      permissions: null,
 
       login: (tokens: AuthTokens) => {
         if (typeof window !== 'undefined') {
@@ -51,6 +57,7 @@ export const useAuthStore = create<AuthState>()(
           accessToken: null,
           refreshToken: null,
           isAuthenticated: false,
+          permissions: null,
         });
       },
 
@@ -59,6 +66,8 @@ export const useAuthStore = create<AuthState>()(
           user: state.user ? { ...state.user, ...userData } : null,
         }));
       },
+
+      setPermissions: (p: PermissionsResponse) => set({ permissions: p }),
     }),
     {
       name: 'auth-storage',
@@ -67,6 +76,7 @@ export const useAuthStore = create<AuthState>()(
         accessToken: state.accessToken,
         refreshToken: state.refreshToken,
         isAuthenticated: state.isAuthenticated,
+        permissions: state.permissions,
       }),
     }
   )

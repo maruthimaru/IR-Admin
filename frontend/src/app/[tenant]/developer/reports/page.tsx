@@ -8,6 +8,7 @@ import { ReportConfig } from '@/types';
 import { toast } from 'react-toastify';
 import TenantShell from '@/components/tenant/TenantShell';
 import { Plus, Edit2, Trash2, BarChart2, Calendar, Tag, Loader2, AlertCircle, Eye } from 'lucide-react';
+import { usePermissions } from '@/hooks/usePermissions';
 
 const COLOURS = [
   'bg-indigo-50 text-indigo-700 border-indigo-200',
@@ -24,6 +25,11 @@ export default function ReportsListPage() {
   const qc        = useQueryClient();
 
   const [selectedCategory, setSelectedCategory] = useState('all');
+
+  const { canSectionAction } = usePermissions();
+  const canAdd       = canSectionAction('reports', 'add');
+  const canConfigure = canSectionAction('reports', 'configure');
+  const canDelete    = canSectionAction('reports', 'delete');
 
   const { data, isLoading, error } = useQuery({
     queryKey: ['reports'],
@@ -71,12 +77,14 @@ export default function ReportsListPage() {
             <h1 className="text-2xl font-bold text-gray-900">Reports</h1>
             <p className="text-sm text-gray-500 mt-0.5">Join collections and build tabular reports</p>
           </div>
-          <button
-            onClick={() => router.push(`/${subdomain}/developer/reports/new`)}
-            className="btn-primary flex items-center gap-2"
-          >
-            <Plus size={16} /> New Report
-          </button>
+          {canAdd && (
+            <button
+              onClick={() => router.push(`/${subdomain}/developer/reports/new`)}
+              className="btn-primary flex items-center gap-2"
+            >
+              <Plus size={16} /> New Report
+            </button>
+          )}
         </div>
 
         {isLoading && (
@@ -96,12 +104,14 @@ export default function ReportsListPage() {
             <BarChart2 size={40} className="mx-auto mb-4 text-gray-300" />
             <p className="text-lg font-medium text-gray-500">No reports yet</p>
             <p className="text-sm text-gray-400 mt-1 mb-6">Create your first report to join collections</p>
-            <button
-              onClick={() => router.push(`/${subdomain}/developer/reports/new`)}
-              className="btn-primary inline-flex items-center gap-2"
-            >
-              <Plus size={16} /> Create Report
-            </button>
+            {canAdd && (
+              <button
+                onClick={() => router.push(`/${subdomain}/developer/reports/new`)}
+                className="btn-primary inline-flex items-center gap-2"
+              >
+                <Plus size={16} /> Create Report
+              </button>
+            )}
           </div>
         )}
 
@@ -186,22 +196,26 @@ export default function ReportsListPage() {
                         >
                           <Eye size={12} /> View
                         </button>
-                        <button
-                          onClick={() => router.push(`/${subdomain}/developer/reports/${report.form_name}`)}
-                          className="flex-1 flex items-center justify-center gap-1.5 text-xs py-1.5 rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50 hover:border-indigo-300 hover:text-indigo-600 transition-colors"
-                        >
-                          <Edit2 size={12} /> Edit
-                        </button>
-                        <button
-                          onClick={() => {
-                            if (confirm(`Delete report "${report.display_name}"?`)) {
-                              deleteMutation.mutate(report.form_name);
-                            }
-                          }}
-                          className="p-1.5 rounded-lg border border-gray-200 text-gray-400 hover:bg-red-50 hover:border-red-200 hover:text-red-500 transition-colors"
-                        >
-                          <Trash2 size={12} />
-                        </button>
+                        {canConfigure && (
+                          <button
+                            onClick={() => router.push(`/${subdomain}/developer/reports/${report.form_name}`)}
+                            className="flex-1 flex items-center justify-center gap-1.5 text-xs py-1.5 rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50 hover:border-indigo-300 hover:text-indigo-600 transition-colors"
+                          >
+                            <Edit2 size={12} /> Configure
+                          </button>
+                        )}
+                        {canDelete && (
+                          <button
+                            onClick={() => {
+                              if (confirm(`Delete report "${report.display_name}"?`)) {
+                                deleteMutation.mutate(report.form_name);
+                              }
+                            }}
+                            className="p-1.5 rounded-lg border border-gray-200 text-gray-400 hover:bg-red-50 hover:border-red-200 hover:text-red-500 transition-colors"
+                          >
+                            <Trash2 size={12} />
+                          </button>
+                        )}
                       </div>
                     </div>
                   );

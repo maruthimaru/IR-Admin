@@ -13,7 +13,8 @@
 import { useState, useEffect } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { formsAPI, reportsAPI } from '@/lib/api';
-import { ReportConfig, ReportJoin, ReportColumn } from '@/types';
+import { ReportConfig, ReportJoin, ReportColumn, InvoiceConfig } from '@/types';
+import InvoiceBuilder, { emptyInvoiceConfig } from './InvoiceBuilder';
 import { toast } from 'react-toastify';
 import { Plus, Trash2, Save, RefreshCw } from 'lucide-react';
 
@@ -30,6 +31,9 @@ interface ColumnCandidate {
   sourceLabel: string;
   selected: boolean;
   customLabel: string;
+  fieldType: string;
+  group_by: boolean;
+  aggregation: string;
 }
 
 interface InputFormMeta {
@@ -56,12 +60,18 @@ export default function ReportBuilder({ onSuccess, initialConfig }: ReportBuilde
   const [joins,          setJoins]          = useState<BuilderJoin[]>(
     initialConfig?.joins?.map((j, i) => ({ ...j, _id: `join_${i}` })) ?? []
   );
+  const [groupingEnabled,  setGroupingEnabled]  = useState(initialConfig?.grouping_enabled ?? false);
+  const [invoiceEnabled,   setInvoiceEnabled]   = useState(initialConfig?.invoice_enabled ?? false);
+  const [invoiceConfig,    setInvoiceConfig]    = useState<InvoiceConfig>(
+    initialConfig?.invoice_config ?? emptyInvoiceConfig()
+  );
   // Column candidates — loaded by "Load Fields" button
   const [candidates,    setCandidates]    = useState<ColumnCandidate[]>(
     // Re-hydrate saved columns so edit mode shows them pre-selected
     initialConfig?.columns?.map(col => ({
       key: col.key, label: col.label, source: col.source,
       sourceLabel: col.source, selected: true, customLabel: col.label,
+      fieldType: '', group_by: col.group_by ?? false, aggregation: col.aggregation ?? 'none',
     })) ?? []
   );
   const [loadingFields, setLoadingFields] = useState(false);
@@ -104,7 +114,7 @@ export default function ReportBuilder({ onSuccess, initialConfig }: ReportBuilde
     try {
       const next: ColumnCandidate[] = [];
       const existingMap = Object.fromEntries(
-        candidates.filter(c => c.selected).map(c => [c.key, c.customLabel])
+        candidates.filter(c => c.selected).map(c => [c.key, { label: c.customLabel, group_by: c.group_by, aggregation: c.aggregation }])
       );
 
       // Helper: fetch a form's fields — prefer already-loaded data, fall back to API
@@ -120,10 +130,14 @@ export default function ReportBuilder({ onSuccess, initialConfig }: ReportBuilde
       const baseFields = await getFormFields(baseCollection);
       for (const f of baseFields) {
         if (!f.key) continue;
+        const ex = existingMap[f.key];
         next.push({
           key: f.key, label: f.label || f.key, source: 'base', sourceLabel: baseLabel,
           selected: f.key in existingMap,
-          customLabel: existingMap[f.key] ?? f.label,
+          customLabel: ex?.label ?? f.label,
+          fieldType: f.type || '',
+          group_by: ex?.group_by ?? false,
+          aggregation: ex?.aggregation ?? 'none',
         });
       }
 
@@ -136,10 +150,14 @@ export default function ReportBuilder({ onSuccess, initialConfig }: ReportBuilde
           for (const f of joinFields) {
             if (!f.key) continue;
             const key = `${join.as}.${f.key}`;
+            const ex = existingMap[key];
             next.push({
               key, label: f.label || f.key, source: join.as, sourceLabel: joinLabel,
               selected: key in existingMap,
-              customLabel: existingMap[key] ?? f.label,
+              customLabel: ex?.label ?? f.label,
+              fieldType: f.type || '',
+              group_by: ex?.group_by ?? false,
+              aggregation: ex?.aggregation ?? 'none',
             });
           }
         } catch {
@@ -161,6 +179,12 @@ export default function ReportBuilder({ onSuccess, initialConfig }: ReportBuilde
 
   const updateLabel = (key: string, label: string) =>
     setCandidates(prev => prev.map(c => c.key === key ? { ...c, customLabel: label } : c));
+
+  const updateGroupBy = (key: string, value: boolean) =>
+    setCandidates(prev => prev.map(c => c.key === key ? { ...c, group_by: value } : c));
+
+  const updateAggregation = (key: string, value: string) =>
+    setCandidates(prev => prev.map(c => c.key === key ? { ...c, aggregation: value } : c));
 
   // ── Mutations ─────────────────────────────────────────────
 
@@ -197,14 +221,21 @@ export default function ReportBuilder({ onSuccess, initialConfig }: ReportBuilde
 
     const selectedColumns: ReportColumn[] = candidates
       .filter(c => c.selected)
-      .map(c => ({ key: c.key, label: c.customLabel || c.label, source: c.source }));
+      .map(c => ({
+        key: c.key, label: c.customLabel || c.label, source: c.source,
+        group_by: groupingEnabled ? c.group_by : false,
+        aggregation: (groupingEnabled ? (c.aggregation || 'none') : 'none') as ReportColumn['aggregation'],
+      }));
 
     if (selectedColumns.length === 0) { toast.error('Select at least one column'); return; }
 
     const payload = {
-      display_name:    displayName || formName,
+      display_name:     displayName || formName,
       category,
-      base_collection: baseCollection,
+      base_collection:  baseCollection,
+      grouping_enabled: groupingEnabled,
+      invoice_enabled:  invoiceEnabled,
+      invoice_config:   invoiceEnabled ? invoiceConfig : emptyInvoiceConfig(),
       joins: joins
         .filter(j => j.collection && j.local_field && j.as)
         // eslint-disable-next-line @typescript-eslint/no-unused-vars
@@ -347,6 +378,22 @@ export default function ReportBuilder({ onSuccess, initialConfig }: ReportBuilde
           </button>
         </div>
 
+        {/* Grouping toggle */}
+        <label className="flex items-center gap-2.5 cursor-pointer bg-amber-50 border border-amber-200 rounded-lg px-3 py-2.5">
+          <input
+            type="checkbox"
+            checked={groupingEnabled}
+            onChange={e => setGroupingEnabled(e.target.checked)}
+            className="form-checkbox text-amber-500"
+          />
+          <div>
+            <span className="text-sm font-medium text-amber-800">Enable Group &amp; Sum</span>
+            <p className="text-xs text-amber-600 mt-0.5">
+              Group rows by selected fields and aggregate number / currency values.
+            </p>
+          </div>
+        </label>
+
         {candidates.length === 0 ? (
           <div className="text-center py-8 border-2 border-dashed border-gray-200 rounded-lg">
             <p className="text-sm text-gray-400">
@@ -368,31 +415,62 @@ export default function ReportBuilder({ onSuccess, initialConfig }: ReportBuilde
                     {isBase ? 'Base' : 'Join'}: {gLabel}
                   </div>
                   <div className="divide-y divide-gray-50 border border-gray-100 rounded-lg overflow-hidden">
-                    {fields.map((f, fi) => (
-                      <div
-                        key={f.key || `${gk}_${fi}`}
-                        className={`flex items-center gap-3 px-3 py-2 ${f.selected ? 'bg-indigo-50/40' : 'bg-white hover:bg-gray-50'}`}
-                      >
-                        <input
-                          type="checkbox"
-                          checked={f.selected}
-                          onChange={() => toggleCandidate(f.key)}
-                          className="rounded text-indigo-600 shrink-0"
-                        />
-                        <span className="text-xs font-mono text-gray-400 w-44 truncate shrink-0">{f.key}</span>
-                        {f.selected ? (
+                    {fields.map((f, fi) => {
+                      const isNumeric = ['number', 'currency', 'percentage'].includes(f.fieldType);
+                      return (
+                        <div
+                          key={f.key || `${gk}_${fi}`}
+                          className={`flex items-center gap-3 px-3 py-2 ${f.selected ? 'bg-indigo-50/40' : 'bg-white hover:bg-gray-50'}`}
+                        >
                           <input
-                            type="text"
-                            className="form-input py-1 text-sm flex-1"
-                            value={f.customLabel}
-                            onChange={e => updateLabel(f.key, e.target.value)}
-                            placeholder="Column label"
+                            type="checkbox"
+                            checked={f.selected}
+                            onChange={() => toggleCandidate(f.key)}
+                            className="rounded text-indigo-600 shrink-0"
                           />
-                        ) : (
-                          <span className="text-sm text-gray-500 flex-1">{f.label}</span>
-                        )}
-                      </div>
-                    ))}
+                          <span className="text-xs font-mono text-gray-400 w-36 truncate shrink-0">{f.key}</span>
+                          {f.selected ? (
+                            <input
+                              type="text"
+                              className="form-input py-1 text-sm flex-1"
+                              value={f.customLabel}
+                              onChange={e => updateLabel(f.key, e.target.value)}
+                              placeholder="Column label"
+                            />
+                          ) : (
+                            <span className="text-sm text-gray-500 flex-1">{f.label}</span>
+                          )}
+                          {/* Grouping controls */}
+                          {groupingEnabled && f.selected && (
+                            <>
+                              <label className="flex items-center gap-1 cursor-pointer shrink-0">
+                                <input
+                                  type="checkbox"
+                                  checked={f.group_by}
+                                  onChange={e => updateGroupBy(f.key, e.target.checked)}
+                                  className="rounded text-amber-500"
+                                />
+                                <span className="text-xs text-amber-700 whitespace-nowrap">Group By</span>
+                              </label>
+                              {(isNumeric || (!f.group_by)) && (
+                                <select
+                                  value={f.aggregation || 'none'}
+                                  onChange={e => updateAggregation(f.key, e.target.value)}
+                                  className="text-xs border border-gray-200 rounded px-1.5 py-1 bg-white text-gray-700 shrink-0"
+                                >
+                                  <option value="none">No Agg</option>
+                                  <option value="sum">Sum</option>
+                                  <option value="avg">Avg</option>
+                                  <option value="min">Min</option>
+                                  <option value="max">Max</option>
+                                  <option value="count">Count</option>
+                                </select>
+                              )}
+                            </>
+                          )}
+                        </div>
+                      );
+                    })}
                   </div>
                 </div>
               );
@@ -400,6 +478,15 @@ export default function ReportBuilder({ onSuccess, initialConfig }: ReportBuilde
           </div>
         )}
       </div>
+
+      {/* ── Invoice ── */}
+      <InvoiceBuilder
+        enabled={invoiceEnabled}
+        config={invoiceConfig}
+        columns={candidates.filter(c => c.selected).map(c => ({ key: c.key, label: c.customLabel || c.label, source: c.source }))}
+        onToggle={setInvoiceEnabled}
+        onChange={setInvoiceConfig}
+      />
 
       {/* ── Save ── */}
       <div className="flex justify-end">
